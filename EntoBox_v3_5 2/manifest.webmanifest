@@ -1,9 +1,0 @@
-{
-  "name": "EntoBox V3.5 Collection Dashboard & Spatial Map",
-  "short_name": "EntoBox",
-  "start_url": "./index.html",
-  "display": "standalone",
-  "background_color": "#e9eeeb",
-  "theme_color": "#123b3c",
-  "icons": [{"src":"assets/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]
-}
