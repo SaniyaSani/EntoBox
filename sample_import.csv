@@ -1,0 +1,5 @@
+catalogNumber,Genus,specificEpithet,subspecies,collectionCode,locality,recordedBy,eventDate,identifiedBy,sizeClass,footprintWidthMm,footprintHeightMm,condition,notes
+ENT-CH-001001,Lucanus,cervus,,DEMO-COL,"Zürich, Switzerland",S. S.,2026-07-20,,xl,72,52,Not assessed,"Select Genus + specificEpithet for Scientific name"
+ENT-CH-001002,Cetonia,aurata,,DEMO-COL,"Ticino, Switzerland",A. Meier,2025-06-18,L. M.,m,30,24,Good,
+,,,,DEMO-COL,,,,,s,18,16,Not assessed,"Unidentified record; complete later"
+ENT-CH-001004,Carabus,auratus,honesti,DEMO-COL,"Valais, Switzerland",J. Keller,2023-07-11,O. H.,l,42,30,Attention,"Example with a subspecies column"
