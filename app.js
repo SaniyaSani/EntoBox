@@ -1,8 +1,11 @@
 (() => {
   'use strict';
 
-  const STATE_KEY = 'entobox-v3-spatial-state';
-  const HAD_SAVED_STATE_AT_LAUNCH = (() => { try { return !!localStorage.getItem(STATE_KEY); } catch { return false; } })();
+  const APP_VERSION = '4.5.0-beta';
+  const STATE_KEY = 'entobox-v4-beta-state';
+  const LEGACY_STATE_KEY = 'entobox-v3-spatial-state';
+  const PRE_IMPORT_KEY = 'entobox-v4-pre-import-backup';
+  const HAD_SAVED_STATE_AT_LAUNCH = (() => { try { return !!(localStorage.getItem(STATE_KEY) || localStorage.getItem(LEGACY_STATE_KEY)); } catch { return false; } })();
   const DEMO_BG = 'assets/demo-box.svg';
   const BLANK_BG = 'assets/blank-box.svg';
   const $ = (s, root = document) => root.querySelector(s);
@@ -44,6 +47,9 @@
       zoneId: data.zoneId || null,
       photoThumb: data.photoThumb || null,
       icon: data.icon || iconForTaxon(data.scientificName),
+      placementStatus: data.placementStatus || 'active',
+      preferredZoneId: data.preferredZoneId || null,
+      createdAt: data.createdAt || nowISO(),
       updatedAt: data.updatedAt || nowISO()
     };
   }
@@ -95,12 +101,12 @@
       specimen({catalogNumber:'ENT-CH-000203',scientificName:'Carabus auratus',collectionCode:'DEMO-TEACH',targetBoxId:boxC,footprintWidthMm:34,footprintHeightMm:26,locality:'Winterthur, ZH',recordedBy:'Teaching collection'})
     ];
     return {
-      version: 3,
+      version: 4,
       selectedBoxId: boxA,
-      preferences: { appearance:'mixed', showZones:true, showGrid:false, snap:false, zoom:100, navOpen:false, treeOpen:{} },
+      preferences: { appearance:'mixed', showZones:true, showGrid:false, snap:false, zoom:100, navOpen:false, treeOpen:{}, editMode:'browse', queueFilter:'active', queueView:'compact', gettingStartedHidden:false },
       collectionName: 'Demo Natural History Collection',
       collectionCode: 'DEMO',
-      meta: { isDemo:true, createdAt:nowISO() },
+      meta: { isDemo:true, createdAt:nowISO(), tourCompleted:false, hasOpenedBox:false, hasExportedBackup:false, importedOnce:false, lastSavedAt:null },
       locations: [
         {id:buildingA,type:'building',name:'Building A',code:'A',parentId:null,notes:''},
         {id:room214,type:'room',name:'Room 2.14',code:'2.14',parentId:buildingA,notes:''},
@@ -128,12 +134,12 @@
 
   function emptyState({collectionName='My Entomology Collection', collectionCode=''} = {}) {
     return {
-      version: 3,
+      version: 4,
       selectedBoxId: null,
-      preferences: { appearance:'mixed', showZones:true, showGrid:false, snap:false, zoom:100, navOpen:false, treeOpen:{} },
+      preferences: { appearance:'mixed', showZones:true, showGrid:false, snap:false, zoom:100, navOpen:false, treeOpen:{}, editMode:'browse', queueFilter:'active', queueView:'compact', gettingStartedHidden:false },
       collectionName: String(collectionName || '').trim() || 'My Entomology Collection',
       collectionCode: String(collectionCode || '').trim(),
-      meta: { isDemo:false, createdAt:nowISO() },
+      meta: { isDemo:false, createdAt:nowISO(), tourCompleted:true, hasOpenedBox:false, hasExportedBackup:false, importedOnce:false, lastSavedAt:null },
       locations: [],
       boxes: [],
       zones: [],
@@ -156,6 +162,13 @@
   let pendingImport = null;
   let currentView = 'home';
   let homeAlertsExpanded = false;
+  let selectedAlertId = null;
+  let selectedQueueIds = new Set();
+  let tourStep = -1;
+  let spacePressed = false;
+  let panState = null;
+  let visibleQueueIds = [];
+  let setupWizardDraft = null;
 
   const locationTypeMeta = {
     building:{label:'Building',icon:'▦'},
@@ -227,11 +240,17 @@
 
   function normalizeState(data) {
     const fallback = defaultState();
+    data.version = 4;
     data.collectionName ||= fallback.collectionName;
     data.collectionCode ??= '';
     data.meta ||= {};
     data.meta.isDemo ??= /^Demo\b/i.test(data.collectionName);
     data.meta.createdAt ||= nowISO();
+    data.meta.tourCompleted ??= !data.meta.isDemo;
+    data.meta.hasOpenedBox ??= false;
+    data.meta.hasExportedBackup ??= false;
+    data.meta.importedOnce ??= false;
+    data.meta.lastSavedAt ||= null;
     data.preferences ||= {};
     data.preferences.appearance ||= 'mixed';
     data.preferences.showZones ??= true;
@@ -240,30 +259,65 @@
     data.preferences.zoom ||= 100;
     data.preferences.navOpen ??= false;
     data.preferences.treeOpen ||= {};
+    data.preferences.editMode ||= 'browse';
+    data.preferences.queueFilter ||= 'active';
+    data.preferences.queueView ||= 'compact';
+    data.preferences.gettingStartedHidden ??= false;
+    data.locations ||= [];
+    data.boxes ||= [];
+    data.zones ||= [];
+    data.specimens = (data.specimens || []).map(raw => specimen(raw));
+    data.alerts ||= [];
+    data.activity ||= [];
+    data.trash ||= {specimens:[],zones:[],boxes:[],locations:[]};
+    for (const key of ['specimens','zones','boxes','locations']) data.trash[key] ||= [];
     migrateLegacyLocations(data);
-    // V3.4 keeps specimen rotation removed entirely. Existing local records are
-    // migrated automatically so labels and specimen previews stay horizontal.
     (data.specimens || []).forEach(s => { if ('rotation' in s) delete s.rotation; });
+    // Migrate older condition-only warnings into explicit, resolvable alerts.
+    const linked = new Set(data.alerts.filter(a => a.specimenId && a.status !== 'resolved').map(a => a.specimenId));
+    for (const s of data.specimens) {
+      if (['Attention','Damaged','Missing'].includes(s.condition) && !linked.has(s.id)) {
+        data.alerts.push({
+          id:uid(), specimenId:s.id, boxId:s.boxId || s.targetBoxId || null,
+          type:s.condition === 'Missing' ? 'Missing' : s.condition === 'Damaged' ? 'Damage' : 'Needs inspection',
+          severity:s.condition === 'Missing' ? 'critical' : s.condition === 'Damaged' ? 'high' : 'medium',
+          status:'open', title:s.condition === 'Missing' ? 'Specimen not found' : s.condition === 'Damaged' ? 'Specimen damage recorded' : 'Condition requires attention',
+          description:s.notes || `${s.condition} condition recorded for this specimen.`, reportedAt:s.updatedAt || nowISO(), resolvedAt:null, resolutionNote:'', source:'condition'
+        });
+      }
+    }
+    if (!data.selectedBoxId || !data.boxes.some(b => b.id === data.selectedBoxId)) data.selectedBoxId = data.boxes[0]?.id || null;
+    syncAllBoxPaths(data);
     return data;
   }
 
   function loadState() {
     try {
-      const raw = localStorage.getItem(STATE_KEY);
+      const raw = localStorage.getItem(STATE_KEY) || localStorage.getItem(LEGACY_STATE_KEY);
       if (!raw) return normalizeState(defaultState());
       const parsed = JSON.parse(raw);
-      if (parsed.version !== 3) return normalizeState(defaultState());
+      if (![3,4].includes(parsed.version)) return normalizeState(defaultState());
       return normalizeState(parsed);
     } catch {
       return normalizeState(defaultState());
     }
   }
 
-  function persist(message = 'Saved locally') {
+  function savedTimeLabel() {
+    const value = state?.meta?.lastSavedAt;
+    if (!value) return 'Saved locally';
+    const date = new Date(value);
+    return `Saved locally · ${date.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}`;
+  }
+
+  function persist(message = '') {
     try {
+      state.meta ||= {};
+      state.meta.lastSavedAt = nowISO();
       localStorage.setItem(STATE_KEY, JSON.stringify(state));
-      $('#saveStateLabel').textContent = message;
-      setTimeout(() => { if ($('#saveStateLabel')) $('#saveStateLabel').textContent = 'Saved locally'; }, 1200);
+      const label = $('#saveStateLabel');
+      if (label) label.textContent = message || savedTimeLabel();
+      if (message) setTimeout(() => { const current=$('#saveStateLabel'); if (current) current.textContent=savedTimeLabel(); }, 1300);
     } catch {
       toast('Browser storage is full. Export a backup and reduce image sizes.', 'error');
     }
@@ -328,11 +382,16 @@
     return !name || name === 'unidentified specimen' || name === 'unidentified' || name === 'unknown';
   }
 
+  function alertById(id) { return (state.alerts || []).find(a => a.id === id); }
+
   function activeCollectionAlerts() {
-    const severity = {Missing:0,Damaged:1,Attention:2};
-    return state.specimens
-      .filter(s => s.boxId && ['Attention','Damaged','Missing'].includes(s.condition))
-      .sort((a,b) => (severity[a.condition] ?? 9) - (severity[b.condition] ?? 9) || String(a.scientificName).localeCompare(String(b.scientificName)));
+    const rank = {critical:0,high:1,medium:2,low:3};
+    return (state.alerts || []).filter(a => a.status !== 'resolved').sort((a,b) => (rank[a.severity] ?? 9) - (rank[b.severity] ?? 9) || String(b.reportedAt||'').localeCompare(String(a.reportedAt||'')));
+  }
+
+  function boxForAlert(alert) {
+    const specimen = alert?.specimenId ? specimenById(alert.specimenId) : null;
+    return state.boxes.find(box => box.id === (alert?.boxId || specimen?.boxId || specimen?.targetBoxId)) || null;
   }
 
   function boxForSpecimen(s) {
@@ -345,10 +404,43 @@
     return [...storagePathParts(box), box.code].join(' › ');
   }
 
+  function recordActivity(type, specimenId, message, details={}) {
+    state.activity ||= [];
+    state.activity.unshift({id:uid(),type,specimenId:specimenId||null,message,details,at:nowISO()});
+    if (state.activity.length > 1500) state.activity.length = 1500;
+  }
+
+  function activityForSpecimen(specimenId) {
+    return (state.activity || []).filter(item => item.specimenId === specimenId).slice(0,30);
+  }
+
+  function syncConditionAlertForSpecimen(s) {
+    state.alerts ||= [];
+    const open = state.alerts.find(a => a.specimenId === s.id && a.status !== 'resolved' && a.source === 'condition');
+    if (['Attention','Damaged','Missing'].includes(s.condition)) {
+      const type = s.condition === 'Missing' ? 'Missing' : s.condition === 'Damaged' ? 'Damage' : 'Needs inspection';
+      const severity = s.condition === 'Missing' ? 'critical' : s.condition === 'Damaged' ? 'high' : 'medium';
+      const title = s.condition === 'Missing' ? 'Specimen not found' : s.condition === 'Damaged' ? 'Specimen damage recorded' : 'Condition requires attention';
+      if (open) Object.assign(open,{boxId:s.boxId||s.targetBoxId||null,type,severity,title,description:s.notes||open.description,reportedAt:open.reportedAt||nowISO()});
+      else state.alerts.push({id:uid(),specimenId:s.id,boxId:s.boxId||s.targetBoxId||null,type,severity,status:'open',title,description:s.notes||`${s.condition} condition recorded for this specimen.`,reportedAt:nowISO(),resolvedAt:null,resolutionNote:'',source:'condition'});
+    } else if (open) {
+      open.status='resolved';open.resolvedAt=nowISO();open.resolutionNote='Automatically resolved when specimen condition changed to '+s.condition;
+    }
+  }
+
+  function createAlert({specimenId=null,boxId=null,type='Needs inspection',severity='medium',title='',description=''}) {
+    const specimen = specimenId ? specimenById(specimenId) : null;
+    const alert = {id:uid(),specimenId,boxId:boxId||specimen?.boxId||specimen?.targetBoxId||null,type,severity,status:'open',title:title||type,description:description||'',reportedAt:nowISO(),resolvedAt:null,resolutionNote:'',source:'manual'};
+    state.alerts.push(alert);
+    recordActivity('alert',specimenId,`Alert created: ${alert.title}`,{alertId:alert.id,type:alert.type,severity:alert.severity});
+    return alert;
+  }
+
   function openBoxWorkspace(boxId, specimenId = null, {openNavigation=false} = {}) {
     const box = state.boxes.find(item => item.id === boxId);
     if (!box) return toast('The linked box no longer exists', 'warn');
     state.selectedBoxId = box.id;
+    state.meta.hasOpenedBox = true;
     currentView = 'workspace';
     selectedSpecimenId = specimenId;
     selectedZoneId = null;
@@ -358,29 +450,37 @@
     state.preferences.navOpen = !!openNavigation;
     persist();
     renderAll();
-    if (specimenId) {
-      requestAnimationFrame(() => {
-        const selected = document.querySelector('.specimen.selected');
-        selected?.scrollIntoView({behavior:'smooth',block:'center',inline:'center'});
-        selected?.animate([{transform:'translate(-50%,-50%) scale(1)'},{transform:'translate(-50%,-50%) scale(1.16)'},{transform:'translate(-50%,-50%) scale(1)'}],{duration:700,easing:'ease-out'});
-      });
-      toast('Alert opened at its position in the box');
-    }
+    requestAnimationFrame(() => {
+      fitBoxToScreen();
+      if (specimenId) setTimeout(() => locateSelectedSpecimen(true), 90);
+    });
   }
 
   function setView(view) {
-    currentView = view === 'workspace' ? 'workspace' : 'home';
-    if (currentView === 'home') state.preferences.navOpen = false;
+    currentView = ['workspace','alerts'].includes(view) ? view : 'home';
+    if (currentView !== 'workspace') state.preferences.navOpen = false;
+    persist();
+    renderAll();
+  }
+
+  function openAlertsCenter(alertId=null) {
+    currentView='alerts';
+    selectedAlertId=alertId || selectedAlertId || activeCollectionAlerts()[0]?.id || state.alerts?.[0]?.id || null;
+    state.preferences.navOpen=false;
     persist();
     renderAll();
   }
 
   function renderViewState() {
     const home = currentView === 'home';
+    const workspace = currentView === 'workspace';
+    const alerts = currentView === 'alerts';
     document.body.classList.toggle('home-mode', home);
-    document.body.classList.toggle('workspace-mode', !home);
+    document.body.classList.toggle('workspace-mode', workspace);
+    document.body.classList.toggle('alerts-mode', alerts);
     $('#homeView').hidden = !home;
-    $('#workspaceView').hidden = home;
+    $('#workspaceView').hidden = !workspace;
+    $('#alertsView').hidden = !alerts;
     $('#homeBtn').classList.toggle('active', home);
     $('#homeBtn').setAttribute('aria-current', home ? 'page' : 'false');
     renderNavigationState();
@@ -411,15 +511,38 @@
     });
   }
 
+  function gettingStartedTasks() {
+    const placed = state.specimens.filter(s=>s.boxId).length;
+    return [
+      {id:'storage',label:'Create storage',copy:'Add a building, room, cabinet, or use the collection root.',done:state.locations.length>0,action:()=>openStorageCreateMenu(null)},
+      {id:'box',label:'Create a box',copy:'Make the first spatial specimen box.',done:state.boxes.length>0,action:()=>openNewBox(currentSuggestedParent())},
+      {id:'records',label:'Add records',copy:'Add a specimen or import a spreadsheet.',done:state.specimens.length>0,action:()=>currentBox()?openAddSpecimen():openStorageCreateMenu(null)},
+      {id:'placement',label:'Place a specimen',copy:'Map at least one physical pin position.',done:placed>0,action:()=>currentBox()?openBoxWorkspace(currentBox().id,null,{openNavigation:true}):openStorageCreateMenu(null)},
+      {id:'backup',label:'Download backup',copy:'Protect the local browser workspace.',done:!!state.meta.hasExportedBackup,action:exportBackup}
+    ];
+  }
+
+  function renderGettingStarted() {
+    const panel=$('#gettingStartedPanel');
+    panel.hidden=!!state.preferences.gettingStartedHidden;
+    const tasks=gettingStartedTasks();
+    const done=tasks.filter(t=>t.done).length;
+    $('#gettingStartedCount').textContent=`${done} of ${tasks.length}`;
+    $('#gettingStartedProgress').style.width=`${done/tasks.length*100}%`;
+    $('#gettingStartedTasks').innerHTML=tasks.map(t=>`<button class="getting-task ${t.done?'done':''}" data-start-task="${t.id}"><span class="getting-task-mark">${t.done?'✓':'○'}</span><span><strong>${esc(t.label)}</strong><small>${esc(t.copy)}</small></span></button>`).join('');
+    $$('[data-start-task]', $('#gettingStartedTasks')).forEach(button=>button.onclick=()=>tasks.find(t=>t.id===button.dataset.startTask)?.action());
+  }
+
   function renderHome() {
     syncAllBoxPaths();
     const specimens = state.specimens || [];
     const placed = specimens.filter(s => s.boxId);
-    const unplaced = specimens.filter(s => !s.boxId);
+    const unplaced = specimens.filter(s => !s.boxId && s.placementStatus !== 'skipped');
     const alerts = activeCollectionAlerts();
     const unidentified = specimens.filter(isUnidentified);
     const counts = ['Good','Attention','Damaged','Missing','Not assessed'].reduce((acc,key) => (acc[key]=specimens.filter(s => s.condition===key).length,acc),{});
-    const clearPercent = specimens.length ? Math.round((specimens.length-alerts.length)/specimens.length*100) : 100;
+    const affectedSpecimens = new Set(alerts.map(a=>a.specimenId).filter(Boolean)).size;
+    const clearPercent = specimens.length ? Math.round((specimens.length-affectedSpecimens)/specimens.length*100) : 100;
 
     $('#homeCollectionName').textContent = state.collectionName || 'Natural history collection';
     const isDemoWorkspace=!!state.meta?.isDemo;
@@ -433,42 +556,102 @@
     $('#homeUnidentified').textContent = unidentified.length.toLocaleString();
     $('#homeLocations').textContent = state.locations.length.toLocaleString();
     $('#homeOpenCurrentBoxBtn').textContent = currentBox() ? `Open ${currentBox().code}` : 'Create first box';
+    renderGettingStarted();
 
     const healthSummary = $('#homeHealthSummary');
     healthSummary.textContent = alerts.length ? `${alerts.length} active alert${alerts.length===1?'':'s'}` : 'No active alerts';
     healthSummary.classList.toggle('has-alerts', !!alerts.length);
-    $('#homeHealthVisual').innerHTML = `<div class="health-ring" style="--health-good:${clearPercent}%"><div class="health-ring-copy"><b>${clearPercent}%</b><small>without active alerts</small></div></div><div class="health-message"><strong>${alerts.length ? 'Some specimens need attention' : 'No urgent condition issues recorded'}</strong><p>${placed.length} placed · ${unplaced.length} awaiting placement · ${counts['Not assessed'] || 0} not yet condition-assessed.</p></div>`;
+    $('#homeHealthVisual').innerHTML = `<div class="health-ring" style="--health-good:${clearPercent}%"><div class="health-ring-copy"><b>${clearPercent}%</b><small>without active alerts</small></div></div><div class="health-message"><strong>${alerts.length ? 'Some collection items need attention' : 'No urgent collection-care issues recorded'}</strong><p>${placed.length} placed · ${unplaced.length} awaiting placement · ${counts['Not assessed'] || 0} not yet condition-assessed.</p></div>`;
     $('#homeHealthBreakdown').innerHTML = [
       ['Good',counts.Good,''],['Attention',counts.Attention,'alert'],['Damaged',counts.Damaged,'alert'],['Missing',counts.Missing,'alert'],['Not assessed',counts['Not assessed'],'review']
     ].map(([label,count,klass]) => `<div class="health-state ${klass}"><b>${count}</b><span>${label}</span></div>`).join('');
 
     const visibleAlerts = homeAlertsExpanded ? alerts : alerts.slice(0,6);
     $('#homeShowAllAlertsBtn').hidden = alerts.length <= 6;
-    $('#homeShowAllAlertsBtn').textContent = homeAlertsExpanded ? 'Show fewer' : `Show all ${alerts.length}`;
-    $('#homeAlertList').innerHTML = visibleAlerts.length ? visibleAlerts.map(s => {
-      const box = boxForSpecimen(s);
-      const symbol = s.condition === 'Missing' ? '?' : s.condition === 'Damaged' ? '×' : '!';
-      return `<button class="home-alert-item" data-home-alert-id="${s.id}" data-condition="${esc(s.condition)}"><span class="home-alert-severity">${symbol}</span><span class="home-alert-copy"><strong>${esc(shown(s.scientificName,'Unidentified specimen'))}</strong><span>${esc(shown(s.catalogNumber,'Temporary record'))} · ${esc(s.condition)}</span><small>${esc(box ? `${box.code} · ${box.path}` : 'Box not assigned')}</small></span><span class="home-alert-open">›</span></button>`;
-    }).join('') : '<div class="home-empty-alerts"><div><b>Collection looks calm 🌿</b>No specimens are currently marked Attention, Damaged, or Missing.</div></div>';
-    $$('[data-home-alert-id]', $('#homeAlertList')).forEach(button => button.onclick = () => {
-      const s = specimenById(button.dataset.homeAlertId);
-      if (s?.boxId) openBoxWorkspace(s.boxId,s.id);
-    });
+    $('#homeShowAllAlertsBtn').textContent = homeAlertsExpanded ? 'Show fewer' : `Open alerts centre · ${alerts.length}`;
+    $('#homeAlertList').innerHTML = visibleAlerts.length ? visibleAlerts.map(alert => {
+      const specimen=alert.specimenId?specimenById(alert.specimenId):null;
+      const box=boxForAlert(alert);
+      const symbol=alert.type==='Missing'?'?':alert.type==='Damage'?'×':'!';
+      return `<button class="home-alert-item" data-home-alert-id="${alert.id}" data-condition="${esc(alert.type)}"><span class="home-alert-severity">${symbol}</span><span class="home-alert-copy"><strong>${esc(alert.title)}</strong><span>${esc(specimen?shown(specimen.scientificName,'Unidentified specimen'):box?.name||'Collection alert')} · ${esc(alert.severity)}</span><small>${esc(box ? `${box.code} · ${box.path}` : 'Location not assigned')}</small></span><span class="home-alert-open">›</span></button>`;
+    }).join('') : '<div class="home-empty-alerts"><div><b>Collection looks calm 🌿</b>No unresolved collection-care alerts are recorded.</div></div>';
+    $$('[data-home-alert-id]', $('#homeAlertList')).forEach(button => button.onclick = () => openAlertsCenter(button.dataset.homeAlertId));
 
     const typeCounts = {};
     for (const location of state.locations) typeCounts[location.type] = (typeCounts[location.type] || 0) + 1;
     $('#homeStorageSummary').innerHTML = Object.entries(typeCounts).sort((a,b) => (locationTypeMeta[a[0]]?.label || a[0]).localeCompare(locationTypeMeta[b[0]]?.label || b[0])).map(([type,count]) => `<span class="storage-summary-chip">${storageIcon(type)} <span>${esc(storageTypeTitle(type))}</span><b>${count}</b></span>`).join('') || '<span class="storage-summary-chip">No storage locations yet</span>';
     $('#homeBoxGrid').innerHTML = state.boxes.length ? state.boxes.map(box => {
       const boxPlaced = specimens.filter(s => s.boxId === box.id).length;
-      const boxQueued = specimens.filter(s => !s.boxId && s.targetBoxId === box.id).length;
-      const boxAlerts = specimens.filter(s => s.boxId === box.id && ['Attention','Damaged','Missing'].includes(s.condition)).length;
+      const boxQueued = specimens.filter(s => !s.boxId && s.targetBoxId === box.id && s.placementStatus!=='skipped').length;
+      const boxAlerts = alerts.filter(a => boxForAlert(a)?.id===box.id).length;
       return `<button class="home-box-card" data-home-box-id="${box.id}"><span class="home-box-thumb">${esc(box.code.replace(/^BOX-?/i,''))}</span><span class="home-box-copy"><strong>${esc(box.name)}</strong><span>${esc(box.path || 'Unassigned storage')}</span><small>${box.widthMm} × ${box.heightMm} mm · ${state.zones.filter(z=>z.boxId===box.id).length} zones</small></span><span class="home-box-counts"><b>${boxPlaced} placed</b>${boxQueued?`<span>+${boxQueued} tray</span>`:''}${boxAlerts?`<span class="home-box-alert">${boxAlerts} alert${boxAlerts===1?'':'s'}</span>`:''}</span></button>`;
-    }).join('') : '<div class="home-box-empty">No boxes yet. Create a storage path and your first spatial box.</div>';
+    }).join('') : '<div class="home-box-empty">No boxes yet. Use the setup wizard or create a storage path and your first spatial box.</div>';
     $$('[data-home-box-id]', $('#homeBoxGrid')).forEach(button => button.onclick = () => openBoxWorkspace(button.dataset.homeBoxId));
+  }
+
+  function filteredAlerts() {
+    const q=($('#alertsSearch')?.value||'').trim().toLowerCase();
+    const status=$('#alertsStatusFilter')?.value||'open';
+    const type=$('#alertsTypeFilter')?.value||'all';
+    const severity=$('#alertsSeverityFilter')?.value||'all';
+    return (state.alerts||[]).filter(alert=>{
+      const specimen=alert.specimenId?specimenById(alert.specimenId):null;
+      const box=boxForAlert(alert);
+      const hay=[alert.title,alert.description,alert.type,alert.severity,specimen?.scientificName,specimen?.catalogNumber,box?.name,box?.code,box?.path].join(' ').toLowerCase();
+      return (!q||hay.includes(q))&&(status==='all'||alert.status===status)&&(type==='all'||alert.type===type)&&(severity==='all'||alert.severity===severity);
+    }).sort((a,b)=>String(b.reportedAt||'').localeCompare(String(a.reportedAt||'')));
+  }
+
+  function renderAlertsCenter() {
+    if (!$('#alertsList')) return;
+    const alerts=filteredAlerts();
+    if (!alerts.some(a=>a.id===selectedAlertId)) selectedAlertId=alerts[0]?.id||null;
+    $('#alertsFilterCount').textContent=`${alerts.length} alert${alerts.length===1?'':'s'}`;
+    $('#alertsList').innerHTML=alerts.length?alerts.map(alert=>{
+      const specimen=alert.specimenId?specimenById(alert.specimenId):null;
+      const box=boxForAlert(alert);
+      return `<button class="alert-list-item ${alert.id===selectedAlertId?'active':''}" data-alert-id="${alert.id}" data-severity="${esc(alert.severity)}" data-status="${esc(alert.status)}"><span class="alert-list-severity">${alert.type==='Missing'?'?':alert.type==='Damage'?'×':'!'}</span><span class="alert-list-copy"><strong>${esc(alert.title)}</strong><span>${esc(alert.type)} · ${esc(specimen?shown(specimen.scientificName,'Unidentified specimen'):box?.name||'Collection')}</span><small>${esc(box?`${box.code} · ${box.path}`:'Location not assigned')}</small></span><span class="alert-status-pill">${esc(alert.status)}</span></button>`;
+    }).join(''):'<div class="alert-detail-empty"><div><b>No matching alerts</b>Try another filter or create a new collection-care alert.</div></div>';
+    $$('[data-alert-id]', $('#alertsList')).forEach(button=>button.onclick=()=>{selectedAlertId=button.dataset.alertId;renderAlertsCenter();});
+    renderAlertDetail(alertById(selectedAlertId));
+  }
+
+  function renderAlertDetail(alert) {
+    const panel=$('#alertDetailPanel');
+    if(!alert){panel.innerHTML='<div class="alert-detail-empty"><div><b>Select an alert</b>Its description, exact storage path, and resolution controls will appear here.</div></div>';return;}
+    const specimen=alert.specimenId?specimenById(alert.specimenId):null;
+    const box=boxForAlert(alert);
+    panel.innerHTML=`<div class="alert-detail-header"><span class="alert-detail-icon">${alert.type==='Missing'?'?':alert.type==='Damage'?'×':'!'}</span><div><div class="eyebrow">${esc(alert.type)} · ${esc(alert.severity)}</div><h2>${esc(alert.title)}</h2><p>${esc(specimen?`${shown(specimen.scientificName,'Unidentified specimen')} · ${shown(specimen.catalogNumber,'Temporary record')}`:box?.name||'Collection-level alert')}</p></div><span class="alert-status-pill">${esc(alert.status)}</span></div>
+      <section class="alert-detail-section"><h3>What was reported</h3><p>${esc(shown(alert.description,'No description was supplied.'))}</p></section>
+      <section class="alert-detail-section"><h3>Physical context</h3><div class="alert-meta-grid"><div class="alert-meta-cell"><span>Box</span><b>${esc(box?`${box.code} · ${box.name}`:'Not assigned')}</b></div><div class="alert-meta-cell"><span>Storage path</span><b>${esc(box?.path||'Not assigned')}</b></div><div class="alert-meta-cell"><span>Reported</span><b>${esc(new Date(alert.reportedAt).toLocaleString())}</b></div><div class="alert-meta-cell"><span>Specimen</span><b>${esc(specimen?shown(specimen.scientificName,'Unidentified specimen'):'Box / collection alert')}</b></div></div></section>
+      ${alert.status==='resolved'?`<section class="alert-detail-section"><h3>Resolution</h3><div class="resolution-note"><b>${esc(alert.resolutionNote||'Resolved without a note')}</b><br>${esc(alert.resolvedAt?new Date(alert.resolvedAt).toLocaleString():'')}</div></section>`:''}
+      <div class="alert-detail-actions">${box?'<button class="btn primary" id="alertOpenLocation">Open exact location</button>':''}<button class="btn" id="alertResolveToggle">${alert.status==='resolved'?'Reopen alert':'Mark resolved'}</button><button class="btn" id="alertEditBtn">Edit alert</button></div>`;
+    if($('#alertOpenLocation'))$('#alertOpenLocation').onclick=()=>openBoxWorkspace(box.id,specimen?.boxId?specimen.id:null);
+    $('#alertResolveToggle').onclick=()=>alert.status==='resolved'?reopenAlert(alert):openResolveAlert(alert);
+    $('#alertEditBtn').onclick=()=>openAlertForm(alert);
+  }
+
+  function openResolveAlert(alert) {
+    showModal({eyebrow:'Collection care',title:'Resolve alert',body:`<div class="field"><label>Resolution note</label><textarea id="resolutionNote" placeholder="What was checked, repaired, moved, or confirmed?"></textarea></div><div class="import-note">The alert remains in the history and can be reopened later.</div>`,foot:'<button class="btn" data-close-modal>Cancel</button><button class="btn primary" id="confirmResolveAlert">Mark resolved</button>'});
+    $('#confirmResolveAlert').onclick=()=>{pushHistory();alert.status='resolved';alert.resolvedAt=nowISO();alert.resolutionNote=$('#resolutionNote').value.trim();recordActivity('alert-resolved',alert.specimenId,`Alert resolved: ${alert.title}`,{alertId:alert.id,note:alert.resolutionNote});persist('Alert resolved');closeModal();renderAll();toast('Alert marked resolved');};
+  }
+
+  function reopenAlert(alert) { pushHistory();alert.status='open';alert.resolvedAt=null;alert.resolutionNote='';recordActivity('alert-reopened',alert.specimenId,`Alert reopened: ${alert.title}`,{alertId:alert.id});persist('Alert reopened');renderAll();toast('Alert reopened'); }
+
+  function openAlertForm(existing=null,{specimenId=null,boxId=null}={}) {
+    const alert=existing;
+    let linkedSpecimenId=alert?.specimenId||specimenId||'';
+    let linkedBoxId=alert?.boxId||boxId||specimenById(linkedSpecimenId)?.boxId||currentBox()?.id||'';
+    const specimenOptions=state.specimens.slice(0,1000).map(s=>`<option value="${s.id}" ${s.id===linkedSpecimenId?'selected':''}>${esc(shown(s.scientificName,'Unidentified specimen'))} · ${esc(shown(s.catalogNumber,'Temporary record'))}</option>`).join('');
+    const boxOptions=state.boxes.map(b=>`<option value="${b.id}" ${b.id===linkedBoxId?'selected':''}>${esc(b.code)} · ${esc(b.name)}</option>`).join('');
+    showModal({eyebrow:'Collection care',title:alert?'Edit alert':'Create alert',body:`<div class="form-grid"><div class="field"><label>Category</label><select id="alertType">${['Pest risk','Damage','Missing','Loose label','Needs inspection','Other'].map(v=>`<option ${alert?.type===v?'selected':''}>${v}</option>`).join('')}</select></div><div class="field"><label>Severity</label><select id="alertSeverity">${['low','medium','high','critical'].map(v=>`<option ${alert?.severity===v?'selected':''}>${v}</option>`).join('')}</select></div><div class="field full"><label>Specimen <em>optional</em></label><select id="alertSpecimen"><option value="">No specimen — box or collection alert</option>${specimenOptions}</select></div><div class="field full"><label>Box <em>optional</em></label><select id="alertBox"><option value="">No box assigned</option>${boxOptions}</select></div><div class="field full"><label>Title</label><input id="alertTitle" value="${esc(alert?.title||'')}"></div><div class="field full"><label>Description</label><textarea id="alertDescription">${esc(alert?.description||'')}</textarea></div></div>`,foot:`<button class="btn" data-close-modal>Cancel</button><button class="btn primary" id="saveAlertBtn">${alert?'Save alert':'Create alert'}</button>`});
+    $('#alertSpecimen').onchange=e=>{const s=specimenById(e.target.value);if(s?.boxId)$('#alertBox').value=s.boxId;};
+    $('#saveAlertBtn').onclick=()=>{const type=$('#alertType').value;const title=$('#alertTitle').value.trim()||type;const data={specimenId:$('#alertSpecimen').value||null,boxId:$('#alertBox').value||null,type,severity:$('#alertSeverity').value,title,description:$('#alertDescription').value.trim()};pushHistory();if(alert){Object.assign(alert,data);recordActivity('alert-edited',data.specimenId,`Alert updated: ${title}`,{alertId:alert.id});}else{selectedAlertId=createAlert(data).id;}persist('Alert saved');closeModal();openAlertsCenter(selectedAlertId);toast(alert?'Alert updated':'Alert created');};
   }
 
   function renderAll() {
     renderHome();
+    renderAlertsCenter();
     if (currentBox()) {
       renderBoxes();
       renderQueue();
@@ -487,7 +670,7 @@
     $('#collectionNavBtn').setAttribute('aria-expanded', String(open));
     $('#collectionNavBtn').textContent = open ? '× Collection' : '☰ Collection';
     $('#drawerBackdrop').hidden = !open;
-    $('#drawerHandle').setAttribute('aria-hidden', String(open || currentView === 'home'));
+    $('#drawerHandle').setAttribute('aria-hidden', String(open || currentView !== 'workspace'));
   }
 
   function setNavigationOpen(open) {
@@ -581,6 +764,7 @@
     if (closeNavigation) state.preferences.navOpen = false;
     persist();
     renderAll();
+    requestAnimationFrame(() => fitBoxToScreen());
     toast(`${currentBox().name} opened`);
   }
 
@@ -616,39 +800,64 @@
     return 'xl';
   }
 
+  function queuePassesFilter(s,filter) {
+    if(filter==='active')return s.placementStatus!=='skipped';
+    if(filter==='skipped')return s.placementStatus==='skipped';
+    if(filter==='unidentified')return isUnidentified(s);
+    if(filter==='identified')return !isUnidentified(s);
+    if(filter==='with-photo')return !!s.photoThumb;
+    if(filter==='without-photo')return !s.photoThumb;
+    return true;
+  }
+
   function renderQueue() {
-    const q = ($('#queueSearch').value || '').trim().toLowerCase();
-    const queue = queueForCurrentBox().filter(s => !q || [s.catalogNumber,s.scientificName,s.locality,s.recordedBy].join(' ').toLowerCase().includes(q));
-    $('#queueCount').textContent = queueForCurrentBox().length;
-    $('#autoPlaceBtn').disabled = !queueForCurrentBox().length;
-    $('#autoPlaceBtn').textContent = selectedZoneId ? 'Auto-place in zone' : 'Auto-place';
-    $('#trayHelp').innerHTML = placingSpecimenId ? `<b>${esc(specimenById(placingSpecimenId)?.catalogNumber || '')}</b> selected. Tap the box photograph to place the pin. Press Esc to cancel.` : 'Drag the beetle handle onto the box, or press <b>Place</b> and tap the photograph.';
-    if (!queue.length) {
-      $('#queueList').innerHTML = `<div class="empty-state">${q ? 'No matching unplaced records.' : 'No unplaced records for this box. Import a spreadsheet or add a specimen.'}</div>`;
-      return;
-    }
-    $('#queueList').innerHTML = queue.map(s => `<div class="queue-item ${s.id === placingSpecimenId ? 'selected' : ''}" data-queue-id="${s.id}">
-      <div class="drag-handle" draggable="true" data-drag-spec="${s.id}" title="Drag onto box">${s.icon}</div>
-      <div class="queue-info"><strong>${esc(shown(s.scientificName,'Unidentified specimen'))}</strong><span>${esc(shown(s.catalogNumber,'Temporary record'))}${s.locality?` · ${esc(s.locality)}`:''}</span></div>
-      <div class="queue-actions"><select data-size-spec="${s.id}" title="Footprint size">${Object.entries(sizePresets).map(([k,v]) => `<option value="${k}" ${sizeKeyForSpec(s)===k?'selected':''}>${v.label}</option>`).join('')}</select><button class="place-btn" data-place-spec="${s.id}">${s.id===placingSpecimenId?'Cancel':'Place'}</button></div>
+    const all=queueForCurrentBox();
+    const q=($('#queueSearch').value||'').trim().toLowerCase();
+    const filter=state.preferences.queueFilter||'active';
+    const queue=all.filter(s=>queuePassesFilter(s,filter)&&(!q||[s.catalogNumber,s.scientificName,s.locality,s.recordedBy].join(' ').toLowerCase().includes(q)));
+    visibleQueueIds=queue.map(s=>s.id);
+    selectedQueueIds=new Set([...selectedQueueIds].filter(id=>all.some(s=>s.id===id)));
+    const active=all.filter(s=>s.placementStatus!=='skipped');
+    const skipped=all.filter(s=>s.placementStatus==='skipped');
+    const placed=state.specimens.filter(s=>s.boxId===currentBox()?.id).length;
+    $('#queueCount').textContent=active.length;
+    $('#trayPlacedCount').textContent=placed;
+    $('#trayRemainingCount').textContent=active.length;
+    $('#traySkippedCount').textContent=skipped.length;
+    $('#queueFilter').value=filter;
+    $$('[data-queue-view]').forEach(b=>b.classList.toggle('active',b.dataset.queueView===state.preferences.queueView));
+    $('#queueSelectAll').checked=queue.length>0&&queue.every(s=>selectedQueueIds.has(s.id));
+    $('#queueSelectAll').indeterminate=queue.some(s=>selectedQueueIds.has(s.id))&&!queue.every(s=>selectedQueueIds.has(s.id));
+    $('#bulkZoneSelect').innerHTML=`<option value="">Any zone</option>${currentZones().map(z=>`<option value="${z.id}">${esc(z.code||'')} · ${esc(z.name)}</option>`).join('')}`;
+    const bulk=$('#queueBulkBar');bulk.hidden=!selectedQueueIds.size;$('#queueSelectedCount').textContent=selectedQueueIds.size;
+    const arranging=state.preferences.editMode==='arrange';
+    $('#trayHelp').innerHTML=placingSpecimenId?`<b>${esc(specimenById(placingSpecimenId)?.catalogNumber||'')}</b> selected. Tap the box photograph to place the pin. Press Esc to cancel.`:arranging?'Drag the beetle handle onto the box, or press <b>Place</b> and tap the photograph.':'Browse mode prevents accidental placement. Switch to <b>Arrange</b> when you are ready to map specimens.';
+    if(!queue.length){$('#queueList').innerHTML=`<div class="empty-state">${q||filter!=='active'?'No matching placement records.':'No active unplaced records for this box. Import a spreadsheet or add a specimen.'}</div>`;return;}
+    $('#queueList').innerHTML=queue.map(s=>`<div class="queue-item ${state.preferences.queueView} ${s.id===placingSpecimenId?'selected':''} ${selectedQueueIds.has(s.id)?'selected':''} ${s.placementStatus==='skipped'?'skipped':''}" data-queue-id="${s.id}">
+      <input class="queue-select" type="checkbox" data-queue-select="${s.id}" ${selectedQueueIds.has(s.id)?'checked':''} aria-label="Select ${esc(shown(s.scientificName,'specimen'))}">
+      <div class="drag-handle ${!arranging||s.placementStatus==='skipped'?'disabled':''}" draggable="${arranging&&s.placementStatus!=='skipped'}" data-drag-spec="${s.id}" title="${arranging?'Drag onto box':'Switch to Arrange to place'}">${s.photoThumb?`<img src="${s.photoThumb}" alt="">`:s.icon}</div>
+      <div class="queue-info"><strong>${esc(shown(s.scientificName,'Unidentified specimen'))}${s.placementStatus==='skipped'?'<span class="skip-badge">Skipped</span>':''}</strong><span>${esc(shown(s.catalogNumber,'Temporary record'))}${s.locality?` · ${esc(s.locality)}`:''}</span><div class="queue-extra">${esc(shown(s.recordedBy,'Collector not recorded'))} · ${esc(shown(s.eventDate,'Date not recorded'))}<br>${s.photoThumb?'Photo attached':'No photo'} · ${s.footprintWidthMm} × ${s.footprintHeightMm} mm</div></div>
+      <div class="queue-actions"><select data-size-spec="${s.id}" title="Footprint size">${Object.entries(sizePresets).map(([k,v])=>`<option value="${k}" ${sizeKeyForSpec(s)===k?'selected':''}>${v.label}</option>`).join('')}</select><button class="place-btn" data-place-spec="${s.id}" ${!arranging||s.placementStatus==='skipped'?'disabled':''}>${s.id===placingSpecimenId?'Cancel':'Place'}</button></div>
     </div>`).join('');
-    $$('[data-drag-spec]').forEach(h => {
-      h.ondragstart = e => {
-        e.dataTransfer.setData('text/entobox-specimen', h.dataset.dragSpec);
-        e.dataTransfer.effectAllowed = 'move';
-      };
-    });
-    $$('[data-place-spec]').forEach(b => b.onclick = () => setPlacing(b.dataset.placeSpec));
-    $$('[data-size-spec]').forEach(sel => sel.onchange = () => {
-      const s = specimenById(sel.dataset.sizeSpec);
-      const p = sizePresets[sel.value];
-      pushHistory();
-      s.footprintWidthMm = p.w;
-      s.footprintHeightMm = p.h;
-      s.updatedAt = nowISO();
-      persist();
-      renderQueue();
-    });
+    $$('[data-queue-select]').forEach(input=>input.onchange=()=>{input.checked?selectedQueueIds.add(input.dataset.queueSelect):selectedQueueIds.delete(input.dataset.queueSelect);renderQueue();});
+    $$('[data-drag-spec]').forEach(h=>{h.ondragstart=e=>{if(!arranging||specimenById(h.dataset.dragSpec)?.placementStatus==='skipped'){e.preventDefault();return;}e.dataTransfer.setData('text/entobox-specimen',h.dataset.dragSpec);e.dataTransfer.effectAllowed='move';};});
+    $$('[data-place-spec]').forEach(b=>b.onclick=()=>setPlacing(b.dataset.placeSpec));
+    $$('[data-size-spec]').forEach(sel=>sel.onchange=()=>{const item=specimenById(sel.dataset.sizeSpec),preset=sizePresets[sel.value];pushHistory();item.footprintWidthMm=preset.w;item.footprintHeightMm=preset.h;item.updatedAt=nowISO();recordActivity('size',item.id,`Footprint set to ${preset.label}`,{width:preset.w,height:preset.h});persist('Footprint saved');renderQueue();});
+  }
+
+  function applyBulkSize() {
+    const key=$('#bulkSizeSelect').value;if(!key)return;const preset=sizePresets[key];pushHistory();for(const id of selectedQueueIds){const s=specimenById(id);if(!s)continue;s.footprintWidthMm=preset.w;s.footprintHeightMm=preset.h;s.updatedAt=nowISO();recordActivity('size',s.id,`Footprint set to ${preset.label}`,{width:preset.w,height:preset.h});}persist('Bulk size saved');$('#bulkSizeSelect').value='';renderQueue();toast(`Size ${preset.label} applied to ${selectedQueueIds.size} records`);
+  }
+
+  function skipSelectedQueue() {
+    if(!selectedQueueIds.size)return;pushHistory();for(const id of selectedQueueIds){const s=specimenById(id);if(!s)continue;s.placementStatus=s.placementStatus==='skipped'?'active':'skipped';s.updatedAt=nowISO();recordActivity('placement-skip',s.id,s.placementStatus==='skipped'?'Placement skipped for now':'Returned to active placement queue');}selectedQueueIds.clear();persist('Placement queue updated');renderAll();toast('Selected records moved out of the active placement queue');
+  }
+
+  function finishPlacementSession() {
+    const all=state.specimens.filter(s=>s.targetBoxId===currentBox()?.id||s.boxId===currentBox()?.id);
+    const placed=all.filter(s=>s.boxId===currentBox()?.id).length,remaining=all.filter(s=>!s.boxId&&s.placementStatus!=='skipped').length,skipped=all.filter(s=>!s.boxId&&s.placementStatus==='skipped').length;
+    showModal({eyebrow:'Placement session',title:'Session summary',body:`<div class="health-breakdown"><div class="health-state"><b>${placed}</b><span>Placed</span></div><div class="health-state review"><b>${remaining}</b><span>Remain</span></div><div class="health-state"><b>${skipped}</b><span>Skipped</span></div></div><div class="import-note">Unplaced and skipped records stay safely in the placement tray. You can continue this session at any time.</div>`,foot:'<button class="btn" data-close-modal>Continue working</button><button class="btn primary" id="finishToHomeBtn">Finish and open Home</button>'});
+    $('#finishToHomeBtn').onclick=()=>{selectedQueueIds.clear();closeModal();setView('home');toast('Placement session saved');};
   }
 
   function renderBoxBreadcrumb(box) {
@@ -665,24 +874,21 @@
   }
 
   function renderControls() {
-    const box = currentBox();
-    if (!box) return;
-    $('#currentBoxChip').textContent = box.code;
-    $('#currentBoxChip').title = `${box.name} — open collection structure`;
-    $('#drawerHandleLabel').textContent = box.code;
-    $('#currentBoxTitle').textContent = box.name;
-    renderBoxBreadcrumb(box);
-    const placed = placedInCurrentBox();
-    const alertCount = placed.filter(s => ['Attention','Damaged','Missing'].includes(s.condition)).length;
-    $('#boxStats').textContent = `${placed.length} placed · ${currentZones().length} zones${alertCount ? ` · ${alertCount} alert${alertCount===1?'':'s'}` : ''}`;
-    $$('[data-appearance]').forEach(b => b.classList.toggle('active', b.dataset.appearance === state.preferences.appearance));
-    $('#showZonesToggle').checked = state.preferences.showZones;
-    $('#showGridToggle').checked = state.preferences.showGrid;
-    $('#snapToggle').checked = state.preferences.snap;
-    $('#zoomRange').value = state.preferences.zoom;
-    $('#modeIndicator').textContent = tool === 'zone' ? 'Draw a zone' : placingSpecimenId ? 'Place specimen' : 'Select & move';
-    $('#newZoneBtn').classList.toggle('primary', tool === 'zone');
-    $('#newZoneBtn').textContent = tool === 'zone' ? '× Cancel zone' : '▱ Draw zone';
+    const box=currentBox();if(!box)return;
+    $('#currentBoxChip').textContent=box.code;$('#currentBoxChip').title=`${box.name} — open collection structure`;$('#drawerHandleLabel').textContent=box.code;$('#currentBoxTitle').textContent=box.name;renderBoxBreadcrumb(box);
+    const placed=placedInCurrentBox();const alertCount=activeCollectionAlerts().filter(a=>boxForAlert(a)?.id===box.id).length;
+    $('#boxStats').textContent=`${placed.length} placed · ${currentZones().length} zones${alertCount?` · ${alertCount} alert${alertCount===1?'':'s'}`:''}`;
+    $$('[data-appearance]').forEach(b=>b.classList.toggle('active',b.dataset.appearance===state.preferences.appearance));
+    $$('[data-edit-mode]').forEach(b=>b.classList.toggle('active',b.dataset.editMode===state.preferences.editMode));
+    $('#showZonesToggle').checked=state.preferences.showZones;$('#showGridToggle').checked=state.preferences.showGrid;$('#snapToggle').checked=state.preferences.snap;$('#zoomRange').value=state.preferences.zoom;$('#zoomLabel').textContent=`${Math.round(state.preferences.zoom)}%`;
+    const arranging=state.preferences.editMode==='arrange';
+    $('#newZoneBtn').disabled=!arranging;$('#boxPhotoBtn').disabled=!arranging;$('#snapToggle').disabled=!arranging;
+    $('.control-strip').classList.toggle('arrange-active',arranging);$('.control-strip').classList.toggle('browse-active',!arranging);
+    const label=tool==='zone'?'Draw a zone':placingSpecimenId?'Place specimen':arranging?'Arrange safely':'Browse safely';
+    $('#modeIndicator').textContent=label;$('#modeIndicator').classList.toggle('arrange',arranging);
+    $('#newZoneBtn').classList.toggle('primary',tool==='zone');$('#newZoneBtn').textContent=tool==='zone'?'× Cancel zone':'▱ Draw zone';
+    $('#locateSelectedBtn').disabled=!selectedSpecimenId;
+    $('#saveStateLabel').textContent=savedTimeLabel();
   }
 
   function specimenRect(s, box = currentBox()) {
@@ -702,85 +908,86 @@
   }
 
   function renderMap() {
-    const box = currentBox();
-    if (!box) return;
-    const stage = $('#boxStage');
-    $('#boxBackground').src = box.background || DEMO_BG;
-    stage.className = `box-stage appearance-${state.preferences.appearance} tool-${tool}`;
-    $('#gridOverlay').classList.toggle('visible', state.preferences.showGrid);
-    $('#gridOverlay').style.backgroundSize = `${100/box.gridCols}% ${100/box.gridRows}%`;
-    const zoom = state.preferences.zoom / 100;
-    const baseWidth = 980;
-    $('#boxStageWrap').style.width = `${baseWidth * zoom}px`;
-    stage.style.width = `${baseWidth * zoom}px`;
-
-    const zones = currentZones();
-    $('#zoneLayer').style.display = state.preferences.showZones ? 'block' : 'none';
-    $('#zoneLayer').innerHTML = zones.map(z => `<div class="zone ${z.id===selectedZoneId?'selected':''}" data-zone-id="${z.id}" data-color="${z.color||0}" style="left:${z.x}%;top:${z.y}%;width:${z.w}%;height:${z.h}%"><span class="zone-label">${esc(z.code || '')} · ${esc(z.name)}</span></div>`).join('');
-    $$('[data-zone-id]').forEach(el => el.onpointerdown = e => {
-      e.stopPropagation();
-      selectedZoneId = el.dataset.zoneId;
-      selectedSpecimenId = null;
-      inspectorTab = 'details';
-      renderAll();
-    });
-
-    const specs = placedInCurrentBox();
-    const collisions = collisionSet(specs);
-    $('#specimenLayer').innerHTML = specs.map(s => {
-      const r = specimenRect(s, box);
-      const art = s.photoThumb ? `<img src="${s.photoThumb}" alt="">` : s.icon;
-      const conditionAlert = ['Attention','Damaged','Missing'].includes(s.condition);
-      return `<div class="specimen ${s.id===selectedSpecimenId?'selected':''} ${collisions.has(s.id)?'overlap':''} ${conditionAlert?'condition-alert':''}" data-specimen-id="${s.id}" style="left:${s.x}%;top:${s.y}%;width:${r.w}%;height:${r.h}%;transform:translate(-50%,-50%)">
-        <div class="specimen-footprint"></div><div class="specimen-art">${art}</div><div class="pin-anchor"></div>${conditionAlert?`<div class="condition-map-badge" title="${esc(s.condition)}">!</div>`:''}<div class="specimen-label">${esc(s.scientificName)} · ${esc(s.catalogNumber)}</div>
-      </div>`;
-    }).join('');
-    bindSpecimenDrag();
+    const box=currentBox();if(!box)return;const stage=$('#boxStage');$('#boxBackground').src=box.background||BLANK_BG;
+    stage.className=`box-stage appearance-${state.preferences.appearance} tool-${tool} ${state.preferences.editMode}-mode`;
+    $('#gridOverlay').classList.toggle('visible',state.preferences.showGrid);$('#gridOverlay').style.backgroundSize=`${100/box.gridCols}% ${100/box.gridRows}%`;
+    const zoom=state.preferences.zoom/100,baseWidth=980;$('#boxStageWrap').style.width=`${baseWidth*zoom}px`;stage.style.width=`${baseWidth*zoom}px`;
+    const zones=currentZones();$('#zoneLayer').style.display=state.preferences.showZones?'block':'none';$('#zoneLayer').innerHTML=zones.map(z=>`<div class="zone ${z.id===selectedZoneId?'selected':''}" data-zone-id="${z.id}" data-color="${z.color||0}" style="left:${z.x}%;top:${z.y}%;width:${z.w}%;height:${z.h}%"><span class="zone-label">${esc(z.code||'')} · ${esc(z.name)}</span></div>`).join('');
+    $$('[data-zone-id]').forEach(el=>el.onpointerdown=e=>{e.stopPropagation();selectedZoneId=el.dataset.zoneId;selectedSpecimenId=null;inspectorTab='details';renderAll();});
+    const specs=placedInCurrentBox(),collisions=collisionSet(specs),alertSpecimens=new Set(activeCollectionAlerts().map(a=>a.specimenId));
+    $('#specimenLayer').innerHTML=specs.map(s=>{const r=specimenRect(s,box),art=s.photoThumb?`<img src="${s.photoThumb}" alt="">`:s.icon,conditionAlert=alertSpecimens.has(s.id);return `<div class="specimen ${s.id===selectedSpecimenId?'selected':''} ${collisions.has(s.id)?'overlap':''} ${conditionAlert?'condition-alert':''}" data-specimen-id="${s.id}" style="left:${s.x}%;top:${s.y}%;width:${r.w}%;height:${r.h}%;transform:translate(-50%,-50%)"><div class="specimen-footprint"></div><div class="specimen-art">${art}</div><div class="pin-anchor"></div>${conditionAlert?'<div class="condition-map-badge" title="Open collection alert">!</div>':''}<div class="specimen-label">${esc(shown(s.scientificName,'Unidentified specimen'))} · ${esc(shown(s.catalogNumber,'Temporary record'))}</div></div>`;}).join('');
+    bindSpecimenDrag();renderMinimap();requestAnimationFrame(updateMinimapViewport);
   }
 
   function bindSpecimenDrag() {
-    $$('.specimen').forEach(el => {
-      el.onpointerdown = e => {
-        if (tool === 'zone' || e.button !== 0) return;
-        e.stopPropagation();
-        const s = specimenById(el.dataset.specimenId);
-        selectedSpecimenId = s.id;
-        selectedZoneId = null;
-        inspectorTab = 'details';
-        const p = pointFromEvent(e);
-        dragState = { id:s.id, startPointer:p, startX:s.x, startY:s.y, moved:false, el, before:deepClone(state) };
-        el.setPointerCapture?.(e.pointerId);
-        renderInspector();
+    $$('.specimen').forEach(el=>{
+      el.onpointerdown=e=>{
+        if(tool==='zone'||e.button!==0)return;e.stopPropagation();const s=specimenById(el.dataset.specimenId);selectedSpecimenId=s.id;selectedZoneId=null;inspectorTab='details';
+        if(state.preferences.editMode!=='arrange'){renderInspector();renderMap();return;}
+        const p=pointFromEvent(e);dragState={id:s.id,startPointer:p,startX:s.x,startY:s.y,moved:false,el,before:deepClone(state)};el.setPointerCapture?.(e.pointerId);renderInspector();
       };
-      el.onpointermove = e => {
-        if (!dragState || dragState.id !== el.dataset.specimenId) return;
-        const s = specimenById(dragState.id);
-        const p = pointFromEvent(e);
-        const dx = p.x - dragState.startPointer.x;
-        const dy = p.y - dragState.startPointer.y;
-        if (Math.abs(dx)+Math.abs(dy) > .3) dragState.moved = true;
-        let x = dragState.startX + dx, y = dragState.startY + dy;
-        ({x,y} = normalizedPositionFor(s,x,y));
-        s.x = x; s.y = y;
-        el.style.left = `${x}%`; el.style.top = `${y}%`;
-      };
-      el.onpointerup = e => {
-        if (!dragState || dragState.id !== el.dataset.specimenId) return;
-        const s = specimenById(dragState.id);
-        if (dragState.moved) {
-          history.push(dragState.before);
-          if (history.length > 20) history.shift();
-          s.zoneId = zoneAtPoint(s.x,s.y)?.id || null;
-          s.updatedAt = nowISO();
-          persist('Position saved');
-          toast(`Placed ${s.catalogNumber}${s.zoneId ? ` in ${zoneById(s.zoneId).name}` : ''}`);
-        }
-        dragState = null;
-        renderAll();
-      };
-      el.ondblclick = () => openFullRecord(el.dataset.specimenId);
+      el.onpointermove=e=>{if(!dragState||dragState.id!==el.dataset.specimenId||state.preferences.editMode!=='arrange')return;const s=specimenById(dragState.id),p=pointFromEvent(e),dx=p.x-dragState.startPointer.x,dy=p.y-dragState.startPointer.y;if(Math.abs(dx)+Math.abs(dy)>.3)dragState.moved=true;let x=dragState.startX+dx,y=dragState.startY+dy;({x,y}=normalizedPositionFor(s,x,y));s.x=x;s.y=y;el.style.left=`${x}%`;el.style.top=`${y}%`;};
+      el.onpointerup=()=>{if(!dragState||dragState.id!==el.dataset.specimenId)return;const s=specimenById(dragState.id);if(dragState.moved){history.push(dragState.before);if(history.length>20)history.shift();s.zoneId=zoneAtPoint(s.x,s.y)?.id||null;s.updatedAt=nowISO();recordActivity('move',s.id,`Moved within ${currentBox().code}`,{x:s.x,y:s.y,zoneId:s.zoneId});persist('Position saved');toast(`Position saved${s.zoneId?` · ${zoneById(s.zoneId).name}`:''}`);}dragState=null;renderAll();};
+      el.ondblclick=()=>openFullRecord(el.dataset.specimenId);
     });
   }
+
+  function renderMinimap(){const box=currentBox();if(!box)return;const surface=$('#minimapSurface');surface.style.backgroundImage=`url("${box.background||BLANK_BG}")`;$('#minimapZones').innerHTML=state.preferences.showZones?currentZones().map(z=>`<div class="minimap-zone" style="left:${z.x}%;top:${z.y}%;width:${z.w}%;height:${z.h}%"></div>`).join(''):'';$('#minimapSpecimens').innerHTML=placedInCurrentBox().map(s=>`<div class="minimap-dot ${s.id===selectedSpecimenId?'selected':''}" style="left:${s.x}%;top:${s.y}%"></div>`).join('');}
+
+  function updateMinimapViewport(){const scroll=$('#canvasScroll'),stage=$('#boxStage'),vp=$('#minimapViewport');if(!scroll||!stage||!vp)return;const sr=scroll.getBoundingClientRect(),br=stage.getBoundingClientRect();const left=clamp((sr.left-br.left)/br.width*100,0,100),top=clamp((sr.top-br.top)/br.height*100,0,100),width=clamp(sr.width/br.width*100,4,100),height=clamp(sr.height/br.height*100,4,100);vp.style.left=`${left}%`;vp.style.top=`${top}%`;vp.style.width=`${Math.min(width,100-left)}%`;vp.style.height=`${Math.min(height,100-top)}%`;}
+
+  function setCanvasView(left, top, {behavior='auto'}={}) {
+    const scroll = $('#canvasScroll');
+    if (!scroll) return;
+    const maxLeft = Math.max(0, scroll.scrollWidth - scroll.clientWidth);
+    const maxTop = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+    scroll.scrollTo({left:clamp(left,0,maxLeft), top:clamp(top,0,maxTop), behavior});
+  }
+
+  function centerBoxInView({behavior='auto'}={}) {
+    const scroll=$('#canvasScroll'),stage=$('#boxStage');
+    if(!scroll||!stage) return;
+    const left = stage.offsetLeft + stage.clientWidth/2 - scroll.clientWidth/2;
+    const top = stage.offsetTop + stage.clientHeight/2 - scroll.clientHeight/2;
+    setCanvasView(left, top, {behavior});
+    requestAnimationFrame(updateMinimapViewport);
+  }
+
+  function canPanCanvas() {
+    const scroll = $('#canvasScroll');
+    if (!scroll) return false;
+    return scroll.scrollWidth > scroll.clientWidth + 4 || scroll.scrollHeight > scroll.clientHeight + 4;
+  }
+
+  function setZoom(value,{centre=true}={}){
+    const scroll=$('#canvasScroll'),stage=$('#boxStage'),old=state.preferences.zoom;
+    const focusX=scroll&&stage?clamp((scroll.scrollLeft+scroll.clientWidth/2-stage.offsetLeft)/(stage.clientWidth||1),0,1):.5;
+    const focusY=scroll&&stage?clamp((scroll.scrollTop+scroll.clientHeight/2-stage.offsetTop)/(stage.clientHeight||1),0,1):.5;
+    state.preferences.zoom=clamp(Math.round(value/5)*5,50,300);
+    persist('Zoom saved');
+    renderMap();renderControls();
+    requestAnimationFrame(()=>{
+      const newStage=$('#boxStage');
+      if(scroll&&newStage&&centre&&old!==state.preferences.zoom){
+        const left = newStage.offsetLeft + newStage.clientWidth*focusX - scroll.clientWidth/2;
+        const top = newStage.offsetTop + newStage.clientHeight*focusY - scroll.clientHeight/2;
+        setCanvasView(left, top, {behavior:'auto'});
+      }
+      updateMinimapViewport();
+    });
+  }
+
+  function fitBoxToScreen(){
+    const scroll=$('#canvasScroll');
+    if(!scroll)return;
+    const baseW=980,baseH=735;
+    const availableW=Math.max(320,scroll.clientWidth-28),availableH=Math.max(250,scroll.clientHeight-28);
+    const zoom=Math.min(availableW/baseW,availableH/baseH)*100;
+    setZoom(zoom,{centre:false});
+    requestAnimationFrame(()=>centerBoxInView({behavior:'auto'}));
+  }
+
+  function locateSelectedSpecimen(animate=false){const s=selectedSpecimenId?specimenById(selectedSpecimenId):null,scroll=$('#canvasScroll'),stage=$('#boxStage');if(!s||!scroll||!stage)return toast('Select a specimen first','warn');const x=stage.offsetLeft+stage.clientWidth*s.x/100,y=stage.offsetTop+stage.clientHeight*s.y/100;setCanvasView(x-scroll.clientWidth/2,y-scroll.clientHeight/2,{behavior:animate?'smooth':'auto'});const el=document.querySelector(`.specimen[data-specimen-id="${CSS.escape(s.id)}"]`);if(animate)el?.animate([{transform:'translate(-50%,-50%) scale(1)'},{transform:'translate(-50%,-50%) scale(1.18)'},{transform:'translate(-50%,-50%) scale(1)'}],{duration:700,easing:'ease-out'});}
 
   function pointFromEvent(e) {
     const r = $('#boxStage').getBoundingClientRect();
@@ -803,79 +1010,35 @@
   }
 
   function setPlacing(id) {
-    if (placingSpecimenId === id) {
-      placingSpecimenId = null; tool = 'select';
-    } else {
-      placingSpecimenId = id; tool = 'place'; selectedSpecimenId = id; selectedZoneId = null; inspectorTab='details';
-    }
+    const s=specimenById(id);if(!s)return;if(s.placementStatus==='skipped')return toast('Return this record to the active queue before placing it','warn');
+    state.preferences.editMode='arrange';
+    if(placingSpecimenId===id){placingSpecimenId=null;tool='select';}else{placingSpecimenId=id;tool='place';selectedSpecimenId=id;selectedZoneId=null;inspectorTab='details';}
     renderAll();
   }
 
-  function placeSpecimenAt(id, x, y) {
-    const s = specimenById(id);
-    if (!s) return;
-    pushHistory();
-    ({x,y} = normalizedPositionFor(s,x,y));
-    s.boxId = currentBox().id;
-    s.targetBoxId = currentBox().id;
-    s.x = x; s.y = y;
-    s.zoneId = zoneAtPoint(x,y)?.id || null;
-    s.updatedAt = nowISO();
-    selectedSpecimenId = s.id;
-    selectedZoneId = null;
-    placingSpecimenId = null;
-    tool = 'select';
-    persist('Specimen placed');
-    renderAll();
-    toast(`${s.catalogNumber} placed${s.zoneId ? ` in ${zoneById(s.zoneId).name}` : ''}`);
+  function placeSpecimenAt(id,x,y) {
+    const s=specimenById(id);if(!s)return;if(state.preferences.editMode!=='arrange')return toast('Switch to Arrange to place specimens','warn');pushHistory();({x,y}=normalizedPositionFor(s,x,y));s.boxId=currentBox().id;s.targetBoxId=currentBox().id;s.x=x;s.y=y;s.zoneId=zoneAtPoint(x,y)?.id||s.preferredZoneId||null;s.placementStatus='active';s.updatedAt=nowISO();selectedSpecimenId=s.id;selectedZoneId=null;placingSpecimenId=null;tool='select';recordActivity('place',s.id,`Placed in ${currentBox().code}`,{x,y,zoneId:s.zoneId});persist('Specimen placed');renderAll();toast(`${shown(s.catalogNumber,'Specimen')} placed${s.zoneId?` · ${zoneById(s.zoneId)?.name||''}`:''}`);
   }
 
-  function autoPlace() {
-    const queue = queueForCurrentBox();
-    if (!queue.length) return;
-    const box = currentBox();
-    const zone = selectedZoneId ? zoneById(selectedZoneId) : null;
-    const target = zone && zone.boxId === box.id ? {x:zone.x,y:zone.y,w:zone.w,h:zone.h,zoneId:zone.id} : {x:2,y:2,w:96,h:96,zoneId:null};
-    const existing = placedInCurrentBox().map(s => ({...specimenRect(s,box),id:s.id}));
-    const ordered = [...queue].sort((a,b) => b.footprintWidthMm*b.footprintHeightMm - a.footprintWidthMm*a.footprintHeightMm);
-    let placed = 0;
-    pushHistory();
-    for (const s of ordered.slice(0,250)) {
-      const w = s.footprintWidthMm/box.widthMm*100;
-      const h = s.footprintHeightMm/box.heightMm*100;
-      let found = null;
-      const step = Math.max(1.1, Math.min(w,h)/3);
-      for (let cy=target.y+h/2+1; cy<=target.y+target.h-h/2-1 && !found; cy+=step) {
-        for (let cx=target.x+w/2+1; cx<=target.x+target.w-w/2-1; cx+=step) {
-          const r = {x:cx-w/2,y:cy-h/2,w,h};
-          if (!existing.some(o => intersects(r,o,.5))) { found={cx,cy,r}; break; }
-        }
-      }
-      if (found) {
-        s.boxId=box.id;s.targetBoxId=box.id;s.x=found.cx;s.y=found.cy;s.zoneId=target.zoneId;s.updatedAt=nowISO();
-        existing.push({...found.r,id:s.id}); placed++;
-      }
-    }
-    if (!placed) { history.pop(); return toast('No collision-free space found in the selected area','warn'); }
-    persist('Auto-placement saved');
-    renderAll();
-    toast(`${placed} specimen${placed===1?'':'s'} auto-placed${zone ? ` in ${zone.name}` : ''}${placed<queue.length ? ` · ${queue.length-placed} remain` : ''}`);
+  function autoPlace(specimenIds=null,zoneId=null) {
+    const queue=(specimenIds?.length?specimenIds.map(specimenById).filter(Boolean):queueForCurrentBox().filter(s=>s.placementStatus!=='skipped'));
+    if(!queue.length)return toast('Select active placement records first','warn');state.preferences.editMode='arrange';const box=currentBox();const chosenZone=zoneById(zoneId||selectedZoneId||queue.find(s=>s.preferredZoneId)?.preferredZoneId);const zone=chosenZone?.boxId===box.id?chosenZone:null;const target=zone?{x:zone.x,y:zone.y,w:zone.w,h:zone.h,zoneId:zone.id}:{x:2,y:2,w:96,h:96,zoneId:null};const existing=placedInCurrentBox().map(s=>({...specimenRect(s,box),id:s.id}));const ordered=[...queue].sort((a,b)=>b.footprintWidthMm*b.footprintHeightMm-a.footprintWidthMm*a.footprintHeightMm);let placed=0;pushHistory();
+    for(const s of ordered.slice(0,500)){const w=s.footprintWidthMm/box.widthMm*100,h=s.footprintHeightMm/box.heightMm*100;let found=null,step=Math.max(1.1,Math.min(w,h)/3);for(let cy=target.y+h/2+1;cy<=target.y+target.h-h/2-1&&!found;cy+=step){for(let cx=target.x+w/2+1;cx<=target.x+target.w-w/2-1;cx+=step){const r={x:cx-w/2,y:cy-h/2,w,h};if(!existing.some(o=>intersects(r,o,.5))){found={cx,cy,r};break;}}}if(found){s.boxId=box.id;s.targetBoxId=box.id;s.x=found.cx;s.y=found.cy;s.zoneId=target.zoneId||s.preferredZoneId||null;s.placementStatus='active';s.updatedAt=nowISO();existing.push({...found.r,id:s.id});recordActivity('auto-place',s.id,`Auto-placed in ${box.code}`,{x:s.x,y:s.y,zoneId:s.zoneId});placed++;}}
+    if(!placed){history.pop();return toast('No collision-free space found in the selected area','warn');}selectedQueueIds.clear();persist('Auto-placement saved');renderAll();toast(`${placed} specimen${placed===1?'':'s'} auto-placed${zone?` in ${zone.name}`:''}${placed<queue.length?` · ${queue.length-placed} remain`:''}`);
   }
 
-  function startZoneTool() {
-    placingSpecimenId = null;
-    tool = tool === 'zone' ? 'select' : 'zone';
-    renderAll();
-  }
+  function startZoneTool() {if(state.preferences.editMode!=='arrange'){state.preferences.editMode='arrange';toast('Arrange mode enabled');}placingSpecimenId=null;tool=tool==='zone'?'select':'zone';renderAll();}
 
   function handleStagePointerDown(e) {
     if (e.target.closest('.specimen') || e.target.closest('.zone')) return;
     if (placingSpecimenId) {
+      if (state.preferences.editMode !== 'arrange') return toast('Switch to Arrange to place specimens','warn');
       const p = pointFromEvent(e);
       placeSpecimenAt(placingSpecimenId,p.x,p.y);
       return;
     }
     if (tool === 'zone') {
+      if (state.preferences.editMode !== 'arrange') return;
       const p = pointFromEvent(e);
       zoneDraftState = {start:p,current:p,pointerId:e.pointerId};
       updateZoneDraft();
@@ -889,7 +1052,7 @@
   }
 
   function handleStagePointerMove(e) {
-    if (!zoneDraftState) return;
+    if (!zoneDraftState || state.preferences.editMode !== 'arrange') return;
     zoneDraftState.current = pointFromEvent(e);
     updateZoneDraft();
   }
@@ -901,6 +1064,32 @@
     zoneDraftState=null;$('#zoneDraft').hidden=true;
     if (rect.w<3 || rect.h<3) return;
     openZoneCreation(rect);
+  }
+
+  function startCanvasPan(e) {
+    const scroll=$('#canvasScroll');
+    const backgroundHit=!e.target.closest('.specimen,.zone,.minimap');
+    const browseDrag = backgroundHit && state.preferences.editMode==='browse' && e.button===0;
+    const touchDrag = backgroundHit && e.pointerType==='touch' && !placingSpecimenId;
+    const shouldPan=backgroundHit&&canPanCanvas()&&(browseDrag||e.button===1||spacePressed||touchDrag);
+    if(!shouldPan)return;
+    e.preventDefault();
+    panState={pointerId:e.pointerId,startX:e.clientX,startY:e.clientY,scrollLeft:scroll.scrollLeft,scrollTop:scroll.scrollTop};
+    scroll.setPointerCapture?.(e.pointerId);scroll.classList.add('panning');
+  }
+
+  function moveCanvasPan(e) {
+    if(!panState||panState.pointerId!==e.pointerId)return;const scroll=$('#canvasScroll');setCanvasView(panState.scrollLeft-(e.clientX-panState.startX),panState.scrollTop-(e.clientY-panState.startY),{behavior:'auto'});updateMinimapViewport();
+  }
+
+  function endCanvasPan(e) {if(!panState||panState.pointerId!==e.pointerId)return;panState=null;$('#canvasScroll').classList.remove('panning');}
+
+  function handleCanvasWheel(e) {
+    if(e.ctrlKey||e.metaKey){e.preventDefault();setZoom(state.preferences.zoom+(e.deltaY<0?10:-10));}
+  }
+
+  function handleMinimapPointer(e) {
+    const surface=$('#minimapSurface'),scroll=$('#canvasScroll'),stage=$('#boxStage');if(!surface||!scroll||!stage)return;const r=surface.getBoundingClientRect(),x=clamp((e.clientX-r.left)/r.width,0,1),y=clamp((e.clientY-r.top)/r.height,0,1);setCanvasView(stage.offsetLeft+stage.clientWidth*x-scroll.clientWidth/2,stage.offsetTop+stage.clientHeight*y-scroll.clientHeight/2,{behavior:'smooth'});
   }
 
   function updateZoneDraft() {
@@ -936,29 +1125,49 @@
     return renderBoxInspector();
   }
 
+  function recordValue(value,fallback) {
+    const text=String(value??'').trim();
+    return `<b class="${text?'':'empty'}">${esc(text||fallback)}</b>`;
+  }
+
+  function specimenAlerts(s,{includeResolved=false}={}) {
+    return (state.alerts||[]).filter(a=>a.specimenId===s.id&&(includeResolved||a.status!=='resolved'));
+  }
+
+  function activityListHtml(s,limit=6) {
+    const items=activityForSpecimen(s.id).slice(0,limit);
+    if(!items.length)return '<div class="empty-state">No activity has been recorded yet.</div>';
+    return `<div class="activity-list">${items.map(item=>`<div class="activity-item"><span class="activity-dot"></span><span><strong>${esc(item.message)}</strong><small>${esc(new Date(item.at).toLocaleString())}</small></span></div>`).join('')}</div>`;
+  }
+
   function renderSpecimenInspector(s) {
-    const art=s.photoThumb?`<img src="${s.photoThumb}" alt="">`:s.icon;
-    const zone=s.zoneId?zoneById(s.zoneId):null;
-    $('#inspectorBody').innerHTML=`<div class="detail-hero"><div class="detail-art">${art}</div><h2>${esc(shown(s.scientificName,'Unidentified specimen'))}</h2><p>${esc(shown(s.catalogNumber,'Temporary record'))}</p></div>
-      <div class="detail-grid"><div class="detail-cell"><span>Locality</span><b>${esc(shown(s.locality))}</b></div><div class="detail-cell"><span>Collector</span><b>${esc(shown(s.recordedBy))}</b></div><div class="detail-cell"><span>Event date</span><b>${esc(shown(s.eventDate))}</b></div><div class="detail-cell"><span>Identified by</span><b>${esc(shown(s.identifiedBy))}</b></div><div class="detail-cell"><span>Placement</span><b>${s.boxId?`${s.x.toFixed(1)}%, ${s.y.toFixed(1)}%`:'Unplaced'}</b></div><div class="detail-cell"><span>Zone</span><b>${esc(zone?.name||'None')}</b></div></div>
-      <div class="field-row"><div class="field"><label>Footprint width (mm)</label><input type="number" id="detailW" value="${s.footprintWidthMm}" min="2" max="200"></div><div class="field"><label>Footprint height (mm)</label><input type="number" id="detailH" value="${s.footprintHeightMm}" min="2" max="200"></div></div>
-      <div class="field"><label>Zone assignment</label><select id="detailZone"><option value="">No zone</option>${currentZones().map(x=>`<option value="${x.id}" ${x.id===s.zoneId?'selected':''}>${esc(x.code)} · ${esc(x.name)}</option>`).join('')}</select></div>
+    const art=s.photoThumb?`<img src="${s.photoThumb}" alt="Specimen photograph">`:s.icon;
+    const zone=s.zoneId?zoneById(s.zoneId):null,box=boxForSpecimen(s),alerts=specimenAlerts(s);
+    const arranging=state.preferences.editMode==='arrange';
+    $('#inspectorBody').innerHTML=`<div class="detail-hero"><div class="detail-art">${art}</div><h2>${esc(shown(s.scientificName,'Unidentified specimen'))}</h2><p class="${String(s.catalogNumber).startsWith('TEMP-')?'temp-id':''}">${esc(shown(s.catalogNumber,'Temporary record'))}</p></div>
+      <div class="record-sections">
+        <section class="record-section"><div class="record-section-head"><h3>Identity</h3></div><div class="record-section-body record-data-grid"><div class="record-data"><span>Scientific name</span>${recordValue(isUnidentified(s)?'':s.scientificName,'Not determined yet')}</div><div class="record-data"><span>Catalogue number</span>${recordValue(s.catalogNumber,'Temporary ID')}</div><div class="record-data"><span>Identified by</span>${recordValue(s.identifiedBy,'Not determined yet')}</div><div class="record-data"><span>Collection code</span>${recordValue(s.collectionCode,'Not recorded')}</div></div></section>
+        <section class="record-section"><div class="record-section-head"><h3>Collection event</h3></div><div class="record-section-body record-data-grid"><div class="record-data"><span>Locality</span>${recordValue(s.locality,'Not recorded')}</div><div class="record-data"><span>Collector</span>${recordValue(s.recordedBy,'Not recorded')}</div><div class="record-data"><span>Event date</span>${recordValue(s.eventDate,'Not recorded')}</div><div class="record-data"><span>Preparation</span>${recordValue(s.preparationType,'Not recorded')}</div></div></section>
+        <section class="record-section"><div class="record-section-head"><h3>Physical storage</h3></div><div class="record-section-body record-data-grid"><div class="record-data"><span>Box</span>${recordValue(box?`${box.code} · ${box.name}`:'','Not placed')}</div><div class="record-data"><span>Zone</span>${recordValue(zone?.name,'No zone')}</div><div class="record-data"><span>Pin position</span>${recordValue(s.boxId&&s.x!=null?`${s.x.toFixed(1)}%, ${s.y.toFixed(1)}%`:'','Not placed')}</div><div class="record-data"><span>Footprint</span><b>${s.footprintWidthMm} × ${s.footprintHeightMm} mm</b></div></div></section>
+        <section class="record-section"><div class="record-section-head"><h3>Condition & alerts</h3><button class="text-action" id="reportIssueBtn">＋ Report issue</button></div><div class="record-section-body"><div class="record-data-grid"><div class="record-data"><span>Condition</span><b>${esc(s.condition)}</b></div><div class="record-data"><span>Open alerts</span><b>${alerts.length}</b></div></div><div class="inspector-alert-list">${alerts.map(a=>`<button class="inspector-alert-chip" data-inspector-alert="${a.id}"><span>${esc(a.type)} · ${esc(a.title)}</span><b>›</b></button>`).join('')||'<div class="empty-state">No unresolved alerts for this specimen.</div>'}</div></div></section>
+        <section class="record-section"><div class="record-section-head"><h3>Recent history</h3></div><div class="record-section-body">${activityListHtml(s,4)}</div></section>
+      </div>
+      <div class="field-row"><div class="field"><label>Footprint width (mm)</label><input type="number" id="detailW" value="${s.footprintWidthMm}" min="2" max="200" ${arranging?'':'disabled'}></div><div class="field"><label>Footprint height (mm)</label><input type="number" id="detailH" value="${s.footprintHeightMm}" min="2" max="200" ${arranging?'':'disabled'}></div></div>
+      <div class="field"><label>Zone assignment</label><select id="detailZone" ${arranging?'':'disabled'}><option value="">No zone</option>${currentZones().map(x=>`<option value="${x.id}" ${x.id===s.zoneId?'selected':''}>${esc(x.code)} · ${esc(x.name)}</option>`).join('')}</select></div>
       <div class="field"><label>Condition</label><select id="detailCondition"><option ${s.condition==='Not assessed'?'selected':''}>Not assessed</option><option ${s.condition==='Good'?'selected':''}>Good</option><option ${s.condition==='Attention'?'selected':''}>Attention</option><option ${s.condition==='Damaged'?'selected':''}>Damaged</option><option ${s.condition==='Missing'?'selected':''}>Missing</option></select></div>
       <div class="field"><label>Notes</label><textarea id="detailNotes">${esc(s.notes)}</textarea></div>
       <input type="file" id="specimenPhotoInput" accept="image/*" hidden>
-      <div class="action-stack"><button class="btn primary" id="saveSpecimenSpatial">Save spatial details</button><button class="btn" id="editRecordBtn">✎ Edit catalogue data</button><button class="btn" id="uploadSpecimenPhoto">▧ ${s.photoThumb?'Replace':'Add'} specimen photo</button><button class="btn" id="openRecordBtn">Open complete record</button>${s.boxId?'<button class="btn" id="returnToTrayBtn">↩ Return to placement tray</button>':''}<button class="btn danger" id="deleteSpecimenBtn">Delete specimen</button></div>`;
-    $('#saveSpecimenSpatial').onclick=()=>{
-      pushHistory();
-      s.footprintWidthMm=clamp(+$('#detailW').value||30,2,200);s.footprintHeightMm=clamp(+$('#detailH').value||24,2,200);s.zoneId=$('#detailZone').value||null;s.condition=$('#detailCondition').value;s.notes=$('#detailNotes').value.trim();s.updatedAt=nowISO();
-      if(s.boxId&&s.x!=null){const p=normalizedPositionFor(s,s.x,s.y);s.x=p.x;s.y=p.y;}
-      persist();renderAll();toast('Specimen updated');
-    };
+      ${arranging?'':'<div class="import-note">Spatial fields are locked in Browse mode. Switch to Arrange before changing the footprint, zone, or position.</div>'}
+      <div class="action-stack"><button class="btn primary" id="saveSpecimenSpatial">Save details</button><button class="btn" id="editRecordBtn">✎ Edit catalogue data</button><button class="btn" id="uploadSpecimenPhoto">▧ ${s.photoThumb?'Replace':'Add'} specimen photo</button><button class="btn" id="openRecordBtn">Open complete record</button>${s.boxId?'<button class="btn" id="returnToTrayBtn">↩ Return to placement tray</button>':''}<button class="btn danger" id="deleteSpecimenBtn">Move to trash</button></div>`;
+    $('#saveSpecimenSpatial').onclick=()=>{pushHistory();if(arranging){s.footprintWidthMm=clamp(+$('#detailW').value||30,2,200);s.footprintHeightMm=clamp(+$('#detailH').value||24,2,200);s.zoneId=$('#detailZone').value||null;if(s.boxId&&s.x!=null){const p=normalizedPositionFor(s,s.x,s.y);s.x=p.x;s.y=p.y;}}s.condition=$('#detailCondition').value;s.notes=$('#detailNotes').value.trim();s.updatedAt=nowISO();syncConditionAlertForSpecimen(s);recordActivity('edit',s.id,'Specimen details updated',{condition:s.condition,zoneId:s.zoneId});persist('Specimen saved');renderAll();toast('Specimen updated');};
     $('#editRecordBtn').onclick=()=>openEditSpecimenRecord(s);
+    $('#reportIssueBtn').onclick=()=>openAlertForm(null,{specimenId:s.id,boxId:s.boxId});
+    $$('[data-inspector-alert]').forEach(button=>button.onclick=()=>openAlertsCenter(button.dataset.inspectorAlert));
     $('#uploadSpecimenPhoto').onclick=()=>$('#specimenPhotoInput').click();
-    $('#specimenPhotoInput').onchange=async e=>{if(!e.target.files[0])return;pushHistory();s.photoThumb=await compressImage(e.target.files[0],720,720,.82,'contain');s.updatedAt=nowISO();persist();renderAll();toast('Specimen photo added');};
+    $('#specimenPhotoInput').onchange=async e=>{if(!e.target.files[0])return;pushHistory();s.photoThumb=await compressImage(e.target.files[0],720,720,.82,'contain');s.updatedAt=nowISO();recordActivity('media',s.id,'Specimen photograph added or replaced');persist('Photograph saved');renderAll();toast('Specimen photo saved');};
     $('#openRecordBtn').onclick=()=>openFullRecord(s.id);
-    if($('#returnToTrayBtn'))$('#returnToTrayBtn').onclick=()=>{pushHistory();s.targetBoxId=s.boxId;s.boxId=null;s.x=null;s.y=null;s.zoneId=null;s.updatedAt=nowISO();persist();selectedSpecimenId=s.id;renderAll();toast('Specimen returned to placement tray');};
-    $('#deleteSpecimenBtn').onclick=()=>{if(!confirm(`Delete ${s.catalogNumber}?`))return;pushHistory();state.specimens=state.specimens.filter(x=>x.id!==s.id);selectedSpecimenId=null;persist();renderAll();toast('Specimen deleted');};
+    if($('#returnToTrayBtn'))$('#returnToTrayBtn').onclick=()=>{pushHistory();const oldBox=boxForSpecimen(s);s.targetBoxId=s.boxId;s.boxId=null;s.x=null;s.y=null;s.zoneId=null;s.placementStatus='active';s.updatedAt=nowISO();recordActivity('unplace',s.id,`Returned from ${oldBox?.code||'box'} to placement tray`);persist('Returned to tray');selectedSpecimenId=s.id;renderAll();toast('Specimen returned to placement tray');};
+    $('#deleteSpecimenBtn').onclick=()=>moveSpecimenToTrash(s);
   }
 
   function renderZoneInspector(z) {
@@ -969,16 +1178,16 @@
       <div class="action-stack"><button class="btn primary" id="saveZoneDetails">Save zone</button><button class="btn" id="autoPlaceZone">Auto-place queue in this zone</button><button class="btn danger" id="deleteZone">Delete zone</button></div>`;
     $('#saveZoneDetails').onclick=()=>{pushHistory();z.name=$('#editZoneName').value.trim()||z.name;z.code=$('#editZoneCode').value.trim();z.description=$('#editZoneDescription').value.trim();persist();renderAll();toast('Zone updated');};
     $('#autoPlaceZone').onclick=()=>{selectedZoneId=z.id;autoPlace();};
-    $('#deleteZone').onclick=()=>{if(!confirm(`Delete zone “${z.name}”? Specimens will remain in place.`))return;pushHistory();state.specimens.filter(s=>s.zoneId===z.id).forEach(s=>s.zoneId=null);state.zones=state.zones.filter(x=>x.id!==z.id);selectedZoneId=null;persist();renderAll();toast('Zone deleted');};
+    $('#deleteZone').onclick=()=>moveZoneToTrash(z);
   }
 
   function renderBoxInspector() {
     const box=currentBox();const placed=placedInCurrentBox().length,queued=queueForCurrentBox().length;
     $('#inspectorBody').innerHTML=`<div class="detail-hero"><div class="detail-art" style="font-size:50px">📦</div><h2>${esc(box.name)}</h2><p>${esc(box.path)}</p></div>
-      <div class="detail-grid"><div class="detail-cell"><span>Dimensions</span><b>${box.widthMm} × ${box.heightMm} mm</b></div><div class="detail-cell"><span>Mapped</span><b>${placed} specimens</b></div><div class="detail-cell"><span>Placement tray</span><b>${queued} records</b></div><div class="detail-cell"><span>Zones</span><b>${currentZones().length}</b></div></div>
+      <div class="detail-grid"><div class="detail-cell"><span>Dimensions</span><b>${box.widthMm} × ${box.heightMm} mm</b></div><div class="detail-cell"><span>Mapped</span><b>${placed} specimen${placed===1?'':'s'}</b></div><div class="detail-cell"><span>Placement tray</span><b>${queued} record${queued===1?'':'s'}</b></div><div class="detail-cell"><span>Zones</span><b>${currentZones().length}</b></div></div>
       <p style="font-size:12px;line-height:1.55;color:var(--muted)">The red point is the physical pin anchor. The oval is an approximate footprint, so large antennae, wings and labels can occupy different amounts of space without forcing the collection into rigid cells.</p>
-      <div class="action-stack"><button class="btn primary" id="inspectorImport">⇧ Import Excel / CSV</button><button class="btn" id="inspectorPhoto">▧ Replace box photograph</button><button class="btn" id="editBoxBtn">Edit box dimensions</button></div>`;
-    $('#inspectorImport').onclick=()=>$('#importFileInput').click();$('#inspectorPhoto').onclick=()=>$('#boxPhotoInput').click();$('#editBoxBtn').onclick=()=>openEditBox(box);
+      <div class="action-stack"><button class="btn primary" id="inspectorAddSpecimen">＋ Add specimen</button><button class="btn" id="inspectorImport">⇧ Import Excel / CSV</button><button class="btn" id="inspectorPhoto">▧ Replace box photograph</button><button class="btn" id="editBoxBtn">Edit box dimensions</button></div>`;
+    $('#inspectorAddSpecimen').onclick=()=>openAddSpecimen();$('#inspectorImport').onclick=()=>$('#importFileInput').click();$('#inspectorPhoto').onclick=()=>$('#boxPhotoInput').click();$('#editBoxBtn').onclick=()=>openEditBox(box);
   }
 
   function renderZoneList() {
@@ -996,15 +1205,18 @@
   }
 
   function openFullRecord(id) {
-    const s=specimenById(id);if(!s)return;
-    showModal({eyebrow:'Specimen record',title:shown(s.scientificName,'Unidentified specimen'),body:`<div class="detail-grid">
-      <div class="detail-cell"><span>Catalogue number</span><b>${esc(shown(s.catalogNumber,'Temporary record'))}</b></div><div class="detail-cell"><span>Collection</span><b>${esc(shown(s.collectionCode))}</b></div>
-      <div class="detail-cell"><span>Locality</span><b>${esc(shown(s.locality))}</b></div><div class="detail-cell"><span>Collector</span><b>${esc(shown(s.recordedBy))}</b></div>
-      <div class="detail-cell"><span>Event date</span><b>${esc(shown(s.eventDate))}</b></div><div class="detail-cell"><span>Identified by</span><b>${esc(shown(s.identifiedBy))}</b></div>
-      <div class="detail-cell"><span>Condition</span><b>${esc(s.condition)}</b></div><div class="detail-cell"><span>Preparation</span><b>${esc(s.preparationType)}</b></div>
-      <div class="detail-cell"><span>Physical box</span><b>${esc(state.boxes.find(b=>b.id===s.boxId)?.name||'Unplaced')}</b></div><div class="detail-cell"><span>Zone</span><b>${esc(zoneById(s.zoneId)?.name||'None')}</b></div>
-    </div><div class="field"><label>Notes</label><div style="font-size:13px;line-height:1.6">${esc(shown(s.notes,'No notes'))}</div></div>`,foot:'<button class="btn" data-close-modal>Close</button><button class="btn primary" id="editFromFullRecord">Edit record</button>'});
+    const s=specimenById(id);if(!s)return;const box=boxForSpecimen(s),zone=zoneById(s.zoneId),alerts=specimenAlerts(s,{includeResolved:true});
+    showModal({eyebrow:'Specimen record',title:shown(s.scientificName,'Unidentified specimen'),body:`<div class="record-sections">
+      ${s.photoThumb?`<img class="record-photo" src="${s.photoThumb}" alt="Specimen photograph">`:''}
+      <section class="record-section"><div class="record-section-head"><h3>Identity</h3></div><div class="record-section-body record-data-grid"><div class="record-data"><span>Scientific name</span>${recordValue(isUnidentified(s)?'':s.scientificName,'Not determined yet')}</div><div class="record-data"><span>Catalogue number</span>${recordValue(s.catalogNumber,'Temporary ID')}</div><div class="record-data"><span>Collection</span>${recordValue(s.collectionCode,'Not recorded')}</div><div class="record-data"><span>Identified by</span>${recordValue(s.identifiedBy,'Not determined yet')}</div></div></section>
+      <section class="record-section"><div class="record-section-head"><h3>Collection event</h3></div><div class="record-section-body record-data-grid"><div class="record-data"><span>Locality</span>${recordValue(s.locality,'Not recorded')}</div><div class="record-data"><span>Collector</span>${recordValue(s.recordedBy,'Not recorded')}</div><div class="record-data"><span>Event date</span>${recordValue(s.eventDate,'Not recorded')}</div><div class="record-data"><span>Preparation</span>${recordValue(s.preparationType,'Not recorded')}</div></div></section>
+      <section class="record-section"><div class="record-section-head"><h3>Physical storage</h3></div><div class="record-section-body record-data-grid"><div class="record-data"><span>Box</span>${recordValue(box?`${box.code} · ${box.name}`:'','Not placed')}</div><div class="record-data"><span>Storage path</span>${recordValue(box?.path,'Not placed')}</div><div class="record-data"><span>Zone</span>${recordValue(zone?.name,'No zone')}</div><div class="record-data"><span>Position</span>${recordValue(s.boxId&&s.x!=null?`${s.x.toFixed(1)}%, ${s.y.toFixed(1)}%`:'','Not placed')}</div></div></section>
+      <section class="record-section"><div class="record-section-head"><h3>Condition</h3></div><div class="record-section-body"><div class="record-data-grid"><div class="record-data"><span>Condition</span><b>${esc(s.condition)}</b></div><div class="record-data"><span>Notes</span>${recordValue(s.notes,'No notes')}</div></div><div class="inspector-alert-list">${alerts.map(a=>`<button class="inspector-alert-chip ${a.status==='resolved'?'resolved':''}" data-full-alert="${a.id}"><span>${esc(a.type)} · ${esc(a.title)}</span><b>${esc(a.status)}</b></button>`).join('')||'<div class="empty-state">No alerts in this record.</div>'}</div></div></section>
+      <section class="record-section"><div class="record-section-head"><h3>History</h3></div><div class="record-section-body">${activityListHtml(s,30)}</div></section>
+    </div>`,foot:'<button class="btn" data-close-modal>Close</button><button class="btn" id="reportFromFullRecord">＋ Report issue</button><button class="btn primary" id="editFromFullRecord">Edit record</button>'});
     $('#editFromFullRecord').onclick=()=>{closeModal();openEditSpecimenRecord(s);};
+    $('#reportFromFullRecord').onclick=()=>{closeModal();openAlertForm(null,{specimenId:s.id,boxId:s.boxId});};
+    $$('[data-full-alert]',$('#modalBody')).forEach(b=>b.onclick=()=>{closeModal();openAlertsCenter(b.dataset.fullAlert);});
   }
 
   function openAddSpecimen() {
@@ -1029,8 +1241,8 @@
       const p=sizePresets[$('#addSize').value];
       return specimen({catalogNumber:cat,scientificName:$('#addTaxon').value.trim()||'Unidentified specimen',locality:$('#addLocality').value.trim(),recordedBy:$('#addCollector').value.trim(),eventDate:$('#addDate').value,identifiedBy:$('#addIdentifier').value.trim(),condition:$('#addCondition').value,notes:$('#addNotes').value.trim(),targetBoxId:currentBox().id,footprintWidthMm:p.w,footprintHeightMm:p.h,photoThumb:pendingPhoto});
     };
-    $('#addToTray').onclick=()=>{const s=create();if(!s)return;pushHistory();state.specimens.push(s);selectedSpecimenId=s.id;persist();closeModal();renderAll();toast('Specimen added to placement tray');};
-    $('#addAndPlace').onclick=()=>{const s=create();if(!s)return;pushHistory();state.specimens.push(s);selectedSpecimenId=s.id;placingSpecimenId=s.id;tool='place';persist();closeModal();renderAll();toast('Tap the box to place the specimen');};
+    $('#addToTray').onclick=()=>{const s=create();if(!s)return;pushHistory();state.specimens.push(s);selectedSpecimenId=s.id;currentView='workspace';state.selectedBoxId=s.targetBoxId||currentBox()?.id||state.selectedBoxId;state.preferences.navOpen=true;recordActivity('create',s.id,'Specimen record created in placement tray');syncConditionAlertForSpecimen(s);persist('Specimen added');closeModal();renderAll();requestAnimationFrame(()=>fitBoxToScreen());toast('Specimen added to this box’s placement tray');};
+    $('#addAndPlace').onclick=()=>{const s=create();if(!s)return;pushHistory();state.specimens.push(s);selectedSpecimenId=s.id;placingSpecimenId=s.id;tool='place';currentView='workspace';state.selectedBoxId=s.targetBoxId||currentBox()?.id||state.selectedBoxId;state.preferences.navOpen=false;state.preferences.editMode='arrange';recordActivity('create',s.id,'Specimen record created for immediate placement');syncConditionAlertForSpecimen(s);persist('Specimen added');closeModal();renderAll();requestAnimationFrame(()=>fitBoxToScreen());toast('Tap the open box to place the specimen');};
   }
 
   function nextCatalogNumber() {
@@ -1067,8 +1279,53 @@
       let cat=$('#editCatalog').value.trim()||nextTemporaryNumber();
       if(state.specimens.some(other=>other.id!==s.id&&String(other.catalogNumber||'').toLowerCase()===cat.toLowerCase()))return toast('Catalogue number already exists','warn');
       pushHistory();
-      s.catalogNumber=cat;s.scientificName=$('#editTaxon').value.trim()||'Unidentified specimen';s.collectionCode=$('#editCollectionCode').value.trim();s.locality=$('#editLocality').value.trim();s.recordedBy=$('#editCollector').value.trim();s.eventDate=$('#editDate').value;s.identifiedBy=$('#editIdentifier').value.trim();s.condition=$('#editCondition').value;s.notes=$('#editNotes').value.trim();if(replacementPhoto)s.photoThumb=replacementPhoto;s.icon=iconForTaxon(s.scientificName);s.updatedAt=nowISO();persist();closeModal();renderAll();toast('Specimen record updated');
+      s.catalogNumber=cat;s.scientificName=$('#editTaxon').value.trim()||'Unidentified specimen';s.collectionCode=$('#editCollectionCode').value.trim();s.locality=$('#editLocality').value.trim();s.recordedBy=$('#editCollector').value.trim();s.eventDate=$('#editDate').value;s.identifiedBy=$('#editIdentifier').value.trim();s.condition=$('#editCondition').value;s.notes=$('#editNotes').value.trim();if(replacementPhoto)s.photoThumb=replacementPhoto;s.icon=iconForTaxon(s.scientificName);s.updatedAt=nowISO();syncConditionAlertForSpecimen(s);recordActivity('catalogue-edit',s.id,'Catalogue data updated',{scientificName:s.scientificName,catalogNumber:s.catalogNumber});persist('Record saved');closeModal();renderAll();toast('Specimen record updated');
     };
+  }
+
+  function moveSpecimenToTrash(s) {
+    if(!confirm(`Move ${shown(s.catalogNumber,'this specimen')} to trash? You can restore it from Collection setup.`))return;
+    pushHistory();
+    const linkedAlerts=(state.alerts||[]).filter(a=>a.specimenId===s.id);
+    state.trash.specimens.unshift({id:uid(),item:deepClone(s),alerts:deepClone(linkedAlerts),deletedAt:nowISO()});
+    state.alerts=(state.alerts||[]).filter(a=>a.specimenId!==s.id);
+    state.specimens=state.specimens.filter(x=>x.id!==s.id);
+    selectedSpecimenId=null;persist('Moved to trash');renderAll();toast('Specimen moved to trash');
+  }
+
+  function moveZoneToTrash(z) {
+    if(!confirm(`Move zone “${z.name}” to trash? Specimens stay in their current positions.`))return;
+    pushHistory();const affected=state.specimens.filter(s=>s.zoneId===z.id).map(s=>s.id);state.trash.zones.unshift({id:uid(),item:deepClone(z),affectedSpecimenIds:affected,deletedAt:nowISO()});state.specimens.filter(s=>s.zoneId===z.id).forEach(s=>s.zoneId=null);state.zones=state.zones.filter(x=>x.id!==z.id);selectedZoneId=null;persist('Zone moved to trash');renderAll();toast('Zone moved to trash');
+  }
+
+  function moveLocationToTrash(location) {
+    const childCount=state.locations.filter(l=>l.parentId===location.id).length,boxCount=state.boxes.filter(b=>b.parentLocationId===location.id).length;
+    if(childCount||boxCount)return toast(`Move or delete ${childCount+boxCount} nested item${childCount+boxCount===1?'':'s'} first`,'warn');
+    if(!confirm(`Move ${location.name} to trash?`))return;pushHistory();state.trash.locations.unshift({id:uid(),item:deepClone(location),deletedAt:nowISO()});state.locations=state.locations.filter(l=>l.id!==location.id);syncAllBoxPaths();persist('Location moved to trash');closeModal();renderAll();toast('Storage location moved to trash');
+  }
+
+  function moveBoxToTrash(box) {
+    const records=state.specimens.filter(s=>s.boxId===box.id||s.targetBoxId===box.id).length,zones=state.zones.filter(z=>z.boxId===box.id).length;
+    if(records||zones)return toast(`This box still contains ${records} record${records===1?'':'s'} and ${zones} zone${zones===1?'':'s'}`,'warn');
+    if(!confirm(`Move ${box.name} to trash?`))return;pushHistory();state.trash.boxes.unshift({id:uid(),item:deepClone(box),deletedAt:nowISO()});state.boxes=state.boxes.filter(b=>b.id!==box.id);state.selectedBoxId=state.boxes[0]?.id||null;persist('Box moved to trash');closeModal();renderAll();toast('Box moved to trash');
+  }
+
+  function restoreTrashEntry(kind,entryId) {
+    const list=state.trash[kind]||[],index=list.findIndex(e=>e.id===entryId);if(index<0)return;const entry=list[index];pushHistory();
+    if(kind==='specimens'){let item=entry.item;if(state.specimens.some(s=>s.id===item.id))item.id=uid();if(state.specimens.some(s=>s.catalogNumber===item.catalogNumber))item.catalogNumber=nextTemporaryNumber();state.specimens.push(specimen(item));for(const alert of entry.alerts||[]){if(state.alerts.some(a=>a.id===alert.id))alert.id=uid();alert.specimenId=item.id;state.alerts.push(alert);}}
+    if(kind==='zones'){const item=entry.item;if(state.zones.some(z=>z.id===item.id))item.id=uid();if(!state.boxes.some(b=>b.id===item.boxId))item.boxId=currentBox()?.id||null;if(item.boxId)state.zones.push(item);for(const id of entry.affectedSpecimenIds||[]){const s=specimenById(id);if(s&&s.boxId===item.boxId)s.zoneId=item.id;}}
+    if(kind==='boxes'){const item=entry.item;if(state.boxes.some(b=>b.id===item.id))item.id=uid();if(item.parentLocationId&&!locationById(item.parentLocationId))item.parentLocationId=null;state.boxes.push(item);state.selectedBoxId=item.id;}
+    if(kind==='locations'){const item=entry.item;if(state.locations.some(l=>l.id===item.id))item.id=uid();if(item.parentId&&!locationById(item.parentId))item.parentId=null;state.locations.push(item);}
+    list.splice(index,1);syncAllBoxPaths();persist('Item restored');renderAll();openTrashRecovery();toast('Item restored from trash');
+  }
+
+  function permanentlyDeleteTrashEntry(kind,entryId) {if(!confirm('Permanently delete this item? This cannot be undone.'))return;state.trash[kind]=(state.trash[kind]||[]).filter(e=>e.id!==entryId);persist('Trash updated');openTrashRecovery();}
+
+  function openTrashRecovery() {
+    const groups=[['specimens','Specimens'],['zones','Zones'],['boxes','Boxes'],['locations','Storage locations']];
+    const html=groups.map(([kind,label])=>{const entries=state.trash[kind]||[];return `<section class="record-section"><div class="record-section-head"><h3>${label}</h3><span class="count-badge">${entries.length}</span></div><div class="record-section-body trash-list">${entries.map(entry=>{const item=entry.item;const name=kind==='specimens'?`${shown(item.scientificName,'Unidentified specimen')} · ${shown(item.catalogNumber,'Temporary record')}`:item.name||item.code||'Deleted item';return `<div class="trash-item"><span><strong>${esc(name)}</strong><small>Deleted ${esc(new Date(entry.deletedAt).toLocaleString())}</small></span><span class="trash-actions"><button class="btn tiny" data-trash-restore="${kind}:${entry.id}">Restore</button><button class="btn tiny danger" data-trash-delete="${kind}:${entry.id}">Delete forever</button></span></div>`;}).join('')||'<div class="empty-state">No items in this section.</div>'}</div></section>`;}).join('');
+    showModal({eyebrow:'Data recovery',title:'Trash & recovery',body:`<div class="import-note">Deleted items remain here until you permanently remove them. Backups also include the trash.</div><div class="record-sections">${html}</div>`,foot:'<button class="btn" data-close-modal>Close</button>'});
+    $$('[data-trash-restore]').forEach(b=>b.onclick=()=>{const[k,id]=b.dataset.trashRestore.split(':');restoreTrashEntry(k,id);});$$('[data-trash-delete]').forEach(b=>b.onclick=()=>{const[k,id]=b.dataset.trashDelete.split(':');permanentlyDeleteTrashEntry(k,id);});
   }
 
   function storageTypeTitle(type) { return locationTypeMeta[type]?.label || 'Storage location'; }
@@ -1212,13 +1469,7 @@
       const name = $('#editLocationName').value.trim();if(!name)return toast('Location name is required','warn');
       pushHistory();location.name=name;location.code=$('#editLocationCode').value.trim();location.type=$('#editLocationType').value;location.parentId=parentId;location.notes=$('#editLocationNotes').value.trim();syncAllBoxPaths();persist();closeModal();renderAll();toast('Storage location updated');
     };
-    $('#deleteLocationBtn').onclick = () => {
-      const childCount=state.locations.filter(l=>l.parentId===location.id).length;
-      const boxCount=state.boxes.filter(b=>b.parentLocationId===location.id).length;
-      if(childCount||boxCount)return toast(`Move or delete ${childCount+boxCount} nested item${childCount+boxCount===1?'':'s'} first`,'warn');
-      if(!confirm(`Delete ${location.name}?`))return;
-      pushHistory();state.locations=state.locations.filter(l=>l.id!==location.id);syncAllBoxPaths();persist();closeModal();renderAll();toast('Storage location deleted');
-    };
+    $('#deleteLocationBtn').onclick = () => moveLocationToTrash(location);
   }
 
   function openEditBox(box) {
@@ -1231,13 +1482,7 @@
       if(state.boxes.some(other=>other.id!==box.id&&String(other.code).toLowerCase()===code.toLowerCase()))return toast('Box code already exists','warn');
       pushHistory();box.name=$('#editBoxName').value.trim()||box.name;box.code=code;box.widthMm=clamp(+$('#editBoxW').value||box.widthMm,100,1200);box.heightMm=clamp(+$('#editBoxH').value||box.heightMm,80,900);box.gridCols=clamp(+$('#editGridCols').value||16,2,50);box.gridRows=clamp(+$('#editGridRows').value||12,2,50);box.parentLocationId=parentId;syncAllBoxPaths();persist();closeModal();renderAll();toast('Box updated');
     };
-    $('#deleteBoxBtn').onclick=()=>{
-      const records=state.specimens.filter(s=>s.boxId===box.id||s.targetBoxId===box.id).length;
-      const zones=state.zones.filter(z=>z.boxId===box.id).length;
-      if(records||zones)return toast(`This box still contains ${records} record${records===1?'':'s'} and ${zones} zone${zones===1?'':'s'}`,'warn');
-      if(!confirm(`Delete ${box.name}?`))return;
-      pushHistory();state.boxes=state.boxes.filter(b=>b.id!==box.id);state.selectedBoxId=state.boxes[0]?.id||null;persist();closeModal();renderAll();toast('Box deleted');
-    };
+    $('#deleteBoxBtn').onclick=()=>moveBoxToTrash(box);
   }
 
   async function compressImage(file,maxW,maxH,quality=.82,fit='cover') {
@@ -1253,8 +1498,11 @@
   }
 
   function exportBackup() {
+    state.meta ||= {};
+    state.meta.hasExportedBackup = true;
+    persist('Backup prepared');
     const safeName=(state.collectionName||'collection').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,48)||'collection';
-    const blob=new Blob([JSON.stringify({...state,exportedAt:nowISO()},null,2)],{type:'application/json'});downloadBlob(blob,`entobox-${safeName}-${new Date().toISOString().slice(0,10)}.json`);toast('Backup downloaded');
+    const blob=new Blob([JSON.stringify({...state,exportedAt:nowISO()},null,2)],{type:'application/json'});downloadBlob(blob,`entobox-${safeName}-${new Date().toISOString().slice(0,10)}.json`);renderHome();toast('Backup downloaded');
   }
   function downloadBlob(blob,name){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);}
 
@@ -1265,6 +1513,8 @@
   function resetTransientUi() {
     selectedSpecimenId=null;
     selectedZoneId=null;
+    selectedAlertId=null;
+    selectedQueueIds.clear();
     inspectorTab='details';
     placingSpecimenId=null;
     tool='select';
@@ -1274,6 +1524,10 @@
     pendingImport=null;
     currentView='home';
     homeAlertsExpanded=false;
+    tourStep=-1;
+    panState=null;
+    spacePressed=false;
+    $('#tourOverlay')?.setAttribute('hidden','');
   }
 
   function replaceWorkspace(nextState,message) {
@@ -1286,94 +1540,125 @@
   }
 
   function openWelcomeModal() {
-    showModal({eyebrow:'Welcome to EntoBox',title:'How would you like to begin?',locked:true,body:`
-      <div class="welcome-intro"><strong>EntoBox can open as a guided demo or as a completely empty collection.</strong><span>Your choice is stored only in this browser and can be changed later from Collection setup.</span></div>
-      <div class="welcome-choice-grid">
-        <button class="welcome-choice featured" id="welcomeNewCollection"><span class="welcome-choice-icon">＋</span><strong>Start a new collection</strong><small>Begin with no buildings, boxes, specimens, alerts, or demo records.</small></button>
-        <button class="welcome-choice" id="welcomeDemoCollection"><span class="welcome-choice-icon">🪲</span><strong>Explore the demo</strong><small>Try spatial boxes, zones, alerts, spreadsheet import, and storage navigation.</small></button>
-        <button class="welcome-choice" id="welcomeRestoreCollection"><span class="welcome-choice-icon">⇧</span><strong>Restore a backup</strong><small>Continue from a previously exported EntoBox JSON file.</small></button>
+    const hasData = collectionHasData();
+    const modeLabel = state.meta?.isDemo ? 'Demo collection currently loaded' : 'Current browser workspace detected';
+    showModal({eyebrow:'EntoBox launch screen',title:'Start new collection or load a demo',locked:true,body:`
+      <div class="welcome-hero">
+        <div class="welcome-hero-copy"><strong>Choose how you want to begin.</strong><span>Open a clean collection, inspect the demo collection, or continue the workspace already stored in this browser.</span></div>
+        ${hasData?`<button class="welcome-continue" id="welcomeContinueCollection"><span>↩</span><div><strong>Continue current collection</strong><small>${esc(modeLabel)} · ${state.specimens.length} specimens · ${state.boxes.length} boxes</small></div></button>`:''}
       </div>
-      <div class="local-first-note">Nothing is uploaded anywhere in this prototype. Data and compressed previews remain in your browser until you export a backup.</div>`,foot:''});
+      <div class="welcome-choice-grid large-start-grid">
+        <button class="welcome-choice featured large" id="welcomeNewCollection"><span class="welcome-choice-icon">＋</span><strong>Start new collection</strong><small>Begin from a clean setup with a guided wizard for storage, first box, and first specimen workflow.</small></button>
+        <button class="welcome-choice large" id="welcomeDemoCollection"><span class="welcome-choice-icon">🪲</span><strong>Load demo collection</strong><small>Open an example workspace with boxes, placements, alerts, and a guided tour.</small></button>
+      </div>
+      <div class="welcome-secondary-row">
+        <button class="welcome-secondary-action" id="welcomeRestoreCollection">⇧ Restore backup</button>
+      </div>
+      <div class="local-first-note">EntoBox is local-first: everything stays in this browser until you export a backup.</div>`,foot:''});
+    if ($('#welcomeContinueCollection')) $('#welcomeContinueCollection').onclick=()=>{welcomePending=false;closeModal();renderAll();requestAnimationFrame(()=>fitBoxToScreen());};
     $('#welcomeNewCollection').onclick=()=>openNewCollectionWizard({fromWelcome:true});
-    $('#welcomeDemoCollection').onclick=()=>{
-      const demo=defaultState();
-      replaceWorkspace(demo,'Demo workspace ready');
-      toast('Demo collection loaded');
-    };
+    $('#welcomeDemoCollection').onclick=()=>{replaceWorkspace(defaultState(),'Demo workspace ready');toast('Demo collection loaded');setTimeout(()=>startGuidedTour(),250);};
     $('#welcomeRestoreCollection').onclick=()=>{$('#backupFileInput').dataset.context='welcome';$('#backupFileInput').click();};
   }
 
   function openNewCollectionWizard({fromWelcome=false}={}) {
-    const destructive=collectionHasData() && !state.meta?.isDemo && !fromWelcome;
-    showModal({eyebrow:'Collection setup',title:'Start a clean collection',locked:fromWelcome,body:`
-      <div class="clean-start-illustration"><span>◆</span><div><strong>A genuinely empty workspace</strong><small>No example buildings, boxes, specimens, alerts, or placement records will be created.</small></div></div>
-      ${destructive?'<div class="destructive-note"><strong>This replaces the collection currently saved in this browser.</strong><span>Download a backup first if you may need the current data again.</span></div>':''}
-      <div class="form-grid">
-        <div class="field full"><label>Collection name</label><input id="newCollectionName" value="My Entomology Collection" placeholder="e.g. Saniya Private Insect Collection"></div>
-        <div class="field"><label>Collection code <em>optional</em></label><input id="newCollectionCode" placeholder="e.g. SPIC"></div>
-        <div class="field"><label>First step</label><select id="newCollectionNext"><option value="storage" selected>Create storage structure next</option><option value="home">Go to the empty dashboard</option></select></div>
-      </div>
-      ${destructive?'<label class="replace-confirm"><input type="checkbox" id="replaceCollectionConfirm"><span>I understand that the current local workspace will be replaced.</span></label>':''}`,foot:`${destructive?'<button class="btn" id="newCollectionBackup">⇩ Download backup</button>':''}<span class="modal-spacer"></span><button class="btn" id="newCollectionCancel">${fromWelcome?'Back':'Cancel'}</button><button class="btn primary" id="createEmptyCollection">Create empty collection</button>`});
-    if($('#newCollectionBackup'))$('#newCollectionBackup').onclick=exportBackup;
-    $('#newCollectionCancel').onclick=()=>fromWelcome?openWelcomeModal():closeModal();
-    $('#createEmptyCollection').onclick=()=>{
-      if(destructive&&!$('#replaceCollectionConfirm').checked)return toast('Please confirm that the current workspace may be replaced','warn');
-      const name=$('#newCollectionName').value.trim()||'My Entomology Collection';
-      const code=$('#newCollectionCode').value.trim();
-      const next=$('#newCollectionNext').value;
-      replaceWorkspace(emptyState({collectionName:name,collectionCode:code}),'New collection created');
-      toast('Your empty collection is ready');
-      if(next==='storage')setTimeout(()=>openStorageCreateMenu(null),120);
-    };
+    setupWizardDraft={fromWelcome,destructive:collectionHasData()&&!state.meta?.isDemo&&!fromWelcome,step:0,name:'My Entomology Collection',code:'',structure:'simple',building:'Building A',room:'Collection room',cabinet:'Cabinet 01',drawer:'Drawer 01',boxName:'Box 01',boxCode:'BOX-01',width:400,height:300,photo:null,next:'add',confirmed:false};
+    renderSetupWizard();
+  }
+
+  function wizardProgress(step) {return `<div class="setup-wizard-progress">${[0,1,2,3].map(i=>`<span class="setup-wizard-step ${i<step?'done':i===step?'active':''}"></span>`).join('')}</div>`;}
+
+  function captureWizardFields() {
+    const d=setupWizardDraft;if(!d)return;
+    const value=id=>$('#'+id)?.value;
+    if(value('wizardCollectionName')!==undefined){d.name=value('wizardCollectionName').trim()||'My Entomology Collection';d.code=value('wizardCollectionCode').trim();}
+    const structure=$('[name="wizardStructure"]:checked')?.value;if(structure)d.structure=structure;
+    for(const [key,id] of [['building','wizardBuilding'],['room','wizardRoom'],['cabinet','wizardCabinet'],['drawer','wizardDrawer'],['boxName','wizardBoxName'],['boxCode','wizardBoxCode']])if(value(id)!==undefined)d[key]=value(id).trim();
+    if(value('wizardBoxWidth')!==undefined)d.width=clamp(+value('wizardBoxWidth')||400,100,1200);
+    if(value('wizardBoxHeight')!==undefined)d.height=clamp(+value('wizardBoxHeight')||300,80,900);
+    if(value('wizardNext')!==undefined)d.next=value('wizardNext');
+    if($('#wizardReplaceConfirm'))d.confirmed=$('#wizardReplaceConfirm').checked;
+  }
+
+  function renderSetupWizard() {
+    const d=setupWizardDraft;if(!d)return;let body='',title='Create your collection';
+    if(d.step===0)body=`${wizardProgress(0)}<div class="clean-start-illustration"><span>◆</span><div><strong>Name the workspace</strong><small>These details can be changed later from Collection setup.</small></div></div><div class="form-grid"><div class="field full"><label>Collection name</label><input id="wizardCollectionName" value="${esc(d.name)}" placeholder="e.g. Saniya Private Insect Collection"></div><div class="field"><label>Collection code <em>optional</em></label><input id="wizardCollectionCode" value="${esc(d.code)}" placeholder="e.g. SPIC"></div></div>`;
+    if(d.step===1)body=`${wizardProgress(1)}<div class="optional-record-note"><strong>Storage levels are optional.</strong><span>A private collection can start with one box. A museum can use the full building-to-drawer hierarchy.</span></div><div class="wizard-choice-grid"><label class="wizard-choice ${d.structure==='simple'?'active':''}"><input type="radio" name="wizardStructure" value="simple" ${d.structure==='simple'?'checked':''}><strong>Just a box</strong><small>Collection → Box</small></label><label class="wizard-choice ${d.structure==='room'?'active':''}"><input type="radio" name="wizardStructure" value="room" ${d.structure==='room'?'checked':''}><strong>Room and box</strong><small>Collection → Room → Box</small></label><label class="wizard-choice ${d.structure==='detailed'?'active':''}"><input type="radio" name="wizardStructure" value="detailed" ${d.structure==='detailed'?'checked':''}><strong>Detailed institutional path</strong><small>Building → Room → Cabinet → Drawer → Box</small></label></div><div id="wizardStructureFields" class="form-grid" style="margin-top:12px"></div>`;
+    if(d.step===2)body=`${wizardProgress(2)}<div class="clean-start-illustration"><span>▣</span><div><strong>Create the first spatial box</strong><small>The photograph is optional. A neutral box map is used until you upload one.</small></div></div><div class="form-grid"><div class="field"><label>Box name</label><input id="wizardBoxName" value="${esc(d.boxName)}"></div><div class="field"><label>Box code</label><input id="wizardBoxCode" value="${esc(d.boxCode)}"></div><div class="field"><label>Width (mm)</label><input type="number" id="wizardBoxWidth" value="${d.width}"></div><div class="field"><label>Height (mm)</label><input type="number" id="wizardBoxHeight" value="${d.height}"></div><div class="field full"><label>Box photograph <em>optional</em></label><input type="file" id="wizardBoxPhoto" accept="image/*"><small>${d.photo?'A compressed preview is ready. Choose another file to replace it.':'You can also upload the photograph later.'}</small></div></div>`;
+    if(d.step===3){const path=d.structure==='simple'?'Collection root':d.structure==='room'?d.room:[d.building,d.room,d.cabinet,d.drawer].filter(Boolean).join(' › ');body=`${wizardProgress(3)}${d.destructive?'<div class="destructive-note"><strong>This replaces the collection currently saved in this browser.</strong><span>Download a backup first if you may need the current workspace again.</span></div>':''}<div class="wizard-review"><div class="wizard-review-row"><span>Collection</span><b>${esc(d.name)}</b></div><div class="wizard-review-row"><span>Storage path</span><b>${esc(path||'Collection root')}</b></div><div class="wizard-review-row"><span>First box</span><b>${esc(d.boxCode)} · ${esc(d.boxName)}</b></div><div class="wizard-review-row"><span>Box size</span><b>${d.width} × ${d.height} mm</b></div></div><div class="field" style="margin-top:12px"><label>After setup</label><select id="wizardNext"><option value="add" ${d.next==='add'?'selected':''}>Add the first specimen</option><option value="import" ${d.next==='import'?'selected':''}>Import Excel / CSV</option><option value="box" ${d.next==='box'?'selected':''}>Open the empty box</option><option value="home" ${d.next==='home'?'selected':''}>Open collection Home</option></select></div>${d.destructive?'<label class="replace-confirm"><input type="checkbox" id="wizardReplaceConfirm" '+(d.confirmed?'checked':'')+'><span>I understand that the current local workspace will be replaced.</span></label>':''}`;}
+    const backLabel=d.step===0?(d.fromWelcome?'Back':'Cancel'):'Back',nextLabel=d.step===3?'Create collection':'Continue';
+    showModal({eyebrow:`Guided setup · Step ${d.step+1} of 4`,title,locked:d.fromWelcome,body,foot:`${d.destructive&&d.step===3?'<button class="btn" id="wizardBackupBtn">⇩ Backup current data</button>':''}<span class="wizard-step-count">Step ${d.step+1} of 4</span><span class="modal-spacer"></span><button class="btn" id="wizardBackBtn">${backLabel}</button><button class="btn primary" id="wizardNextBtn">${nextLabel}</button>`});
+    if(d.step===1){const draw=()=>{d.structure=$('[name="wizardStructure"]:checked')?.value||d.structure;$$('.wizard-choice').forEach(x=>x.classList.toggle('active',x.querySelector('input').checked));$('#wizardStructureFields').innerHTML=d.structure==='simple'?'<div class="import-note">The box will live directly under the collection root.</div>':d.structure==='room'?`<div class="field full"><label>Room / laboratory</label><input id="wizardRoom" value="${esc(d.room)}"></div>`:`<div class="field"><label>Building</label><input id="wizardBuilding" value="${esc(d.building)}"></div><div class="field"><label>Room</label><input id="wizardRoom" value="${esc(d.room)}"></div><div class="field"><label>Cabinet</label><input id="wizardCabinet" value="${esc(d.cabinet)}"></div><div class="field"><label>Drawer</label><input id="wizardDrawer" value="${esc(d.drawer)}"></div>`;};$$('[name="wizardStructure"]').forEach(x=>x.onchange=draw);draw();}
+    if(d.step===2)$('#wizardBoxPhoto').onchange=async e=>{if(e.target.files[0]){d.photo=await compressImage(e.target.files[0],1800,1400,.8,'cover');toast('Box photo preview ready');}};
+    if($('#wizardBackupBtn'))$('#wizardBackupBtn').onclick=exportBackup;
+    $('#wizardBackBtn').onclick=()=>{captureWizardFields();if(d.step===0){setupWizardDraft=null;d.fromWelcome?openWelcomeModal():closeModal();}else{d.step--;renderSetupWizard();}};
+    $('#wizardNextBtn').onclick=()=>{captureWizardFields();if(d.step===0&&!d.name)return toast('Enter a collection name','warn');if(d.step===2&&(!d.boxName||!d.boxCode))return toast('Enter a box name and code','warn');if(d.step<3){d.step++;renderSetupWizard();}else finishSetupWizard();};
+  }
+
+  function finishSetupWizard() {
+    const d=setupWizardDraft;if(!d)return;if(d.destructive&&!d.confirmed)return toast('Please confirm that the current workspace may be replaced','warn');
+    const next=emptyState({collectionName:d.name,collectionCode:d.code});let parentId=null;
+    const addLocation=(type,name,code='')=>{const item={id:uid(),type,name:name||storageTypeTitle(type),code,parentId,notes:''};next.locations.push(item);parentId=item.id;return item;};
+    if(d.structure==='room')addLocation('room',d.room||'Collection room');
+    if(d.structure==='detailed'){addLocation('building',d.building||'Building A');addLocation('room',d.room||'Collection room');addLocation('cabinet',d.cabinet||'Cabinet 01');addLocation('drawer',d.drawer||'Drawer 01');}
+    const box={id:uid(),name:d.boxName||'Box 01',code:d.boxCode||'BOX-01',parentLocationId:parentId,path:'',widthMm:d.width,heightMm:d.height,gridCols:16,gridRows:12,background:d.photo||BLANK_BG};next.boxes.push(box);next.selectedBoxId=box.id;next.meta.tourCompleted=true;syncAllBoxPaths(next);const action=d.next;setupWizardDraft=null;replaceWorkspace(next,'Collection created');toast('Your collection and first box are ready');setTimeout(()=>{
+      if(action==='add'){
+        openBoxWorkspace(box.id);
+        setTimeout(()=>openAddSpecimen(),120);
+      }else if(action==='import'){
+        openBoxWorkspace(box.id);
+        setTimeout(()=>$('#importFileInput').click(),120);
+      }else if(action==='box')openBoxWorkspace(box.id);else setView('home');
+    },180);
   }
 
   function openDemoConfirmation() {
-    const destructive=collectionHasData() && !state.meta?.isDemo;
-    showModal({eyebrow:'Collection setup',title:'Load the EntoBox demo?',body:`
-      <div class="clean-start-illustration demo"><span>🪲</span><div><strong>Restore the complete example workspace</strong><small>The demo includes storage locations, three boxes, specimen records, zones, and a condition alert.</small></div></div>
-      ${destructive?'<div class="destructive-note"><strong>Your current local workspace will be replaced.</strong><span>Export a backup before continuing if the data matters.</span></div>':''}
-      ${destructive?'<label class="replace-confirm"><input type="checkbox" id="replaceWithDemoConfirm"><span>I understand that the current local workspace will be replaced.</span></label>':''}`,foot:`${destructive?'<button class="btn" id="demoBackupBtn">⇩ Download backup</button>':''}<span class="modal-spacer"></span><button class="btn" data-close-modal>Cancel</button><button class="btn primary" id="loadDemoBtn">Load demo</button>`});
+    const destructive=collectionHasData()&&!state.meta?.isDemo;
+    showModal({eyebrow:'Collection setup',title:'Load the EntoBox demo?',body:`<div class="clean-start-illustration demo"><span>🪲</span><div><strong>Restore the complete example workspace</strong><small>The demo includes storage, three boxes, specimen records, zones, a placement tray, and collection-care alerts.</small></div></div>${destructive?'<div class="destructive-note"><strong>Your current local workspace will be replaced.</strong><span>Export a backup before continuing if the data matters.</span></div><label class="replace-confirm"><input type="checkbox" id="replaceWithDemoConfirm"><span>I understand that the current local workspace will be replaced.</span></label>':''}`,foot:`${destructive?'<button class="btn" id="demoBackupBtn">⇩ Download backup</button>':''}<span class="modal-spacer"></span><button class="btn" data-close-modal>Cancel</button><button class="btn primary" id="loadDemoBtn">Load demo</button>`});
     if($('#demoBackupBtn'))$('#demoBackupBtn').onclick=exportBackup;
-    $('#loadDemoBtn').onclick=()=>{
-      if(destructive&&!$('#replaceWithDemoConfirm').checked)return toast('Please confirm that the current workspace may be replaced','warn');
-      replaceWorkspace(defaultState(),'Demo workspace loaded');
-      toast('Demo collection loaded');
-    };
+    $('#loadDemoBtn').onclick=()=>{if(destructive&&!$('#replaceWithDemoConfirm').checked)return toast('Please confirm that the current workspace may be replaced','warn');replaceWorkspace(defaultState(),'Demo workspace loaded');toast('Demo collection loaded');setTimeout(startGuidedTour,250);};
   }
 
   function openCollectionSetup() {
-    const isDemo=!!state.meta?.isDemo;
-    showModal({eyebrow:'Collection setup',title:'Manage this workspace',body:`
-      <div class="workspace-status-card"><span class="collection-mode-badge ${isDemo?'demo':''}">${isDemo?'Demo workspace':'Your collection'}</span><strong>${esc(state.collectionName)}</strong><small>${state.specimens.length} specimens · ${state.boxes.length} boxes · ${state.locations.length} storage locations</small></div>
-      <div class="form-grid setup-details-grid"><div class="field"><label>Collection name</label><input id="setupCollectionName" value="${esc(state.collectionName)}"></div><div class="field"><label>Collection code <em>optional</em></label><input id="setupCollectionCode" value="${esc(state.collectionCode||'')}"></div></div>
-      <div class="setup-action-grid">
-        <button class="setup-action" id="setupNewCollection"><span>＋</span><strong>Start new collection</strong><small>Replace this workspace with a clean, empty collection.</small></button>
-        <button class="setup-action" id="setupRestoreBackup"><span>⇧</span><strong>Restore backup</strong><small>Load an EntoBox JSON backup from your computer.</small></button>
-        <button class="setup-action" id="setupLoadDemo"><span>🪲</span><strong>Load demo collection</strong><small>Return to the complete example workspace.</small></button>
-        <button class="setup-action" id="setupDownloadBackup"><span>⇩</span><strong>Download backup</strong><small>Save all local collection data as a JSON file.</small></button>
-      </div>`,foot:'<button class="btn" data-close-modal>Close</button><button class="btn primary" id="saveCollectionDetails">Save collection details</button>'});
-    $('#saveCollectionDetails').onclick=()=>{
-      state.collectionName=$('#setupCollectionName').value.trim()||'My Entomology Collection';
-      state.collectionCode=$('#setupCollectionCode').value.trim();
-      persist('Collection details saved');closeModal();renderAll();toast('Collection details updated');
-    };
-    $('#setupNewCollection').onclick=()=>openNewCollectionWizard();
-    $('#setupRestoreBackup').onclick=()=>{$('#backupFileInput').dataset.context='setup';$('#backupFileInput').click();};
-    $('#setupLoadDemo').onclick=openDemoConfirmation;
-    $('#setupDownloadBackup').onclick=exportBackup;
+    const isDemo=!!state.meta?.isDemo,trashCount=Object.values(state.trash||{}).reduce((n,list)=>n+(list?.length||0),0);let snapshot=null;try{snapshot=JSON.parse(localStorage.getItem(PRE_IMPORT_KEY)||'null');}catch{}
+    showModal({eyebrow:'Collection setup',title:'Manage this workspace',body:`<div class="workspace-status-card"><span class="collection-mode-badge ${isDemo?'demo':''}">${isDemo?'Demo workspace':'Your collection'}</span><strong>${esc(state.collectionName)}</strong><small>${state.specimens.length} specimens · ${state.boxes.length} boxes · ${state.locations.length} storage locations · ${activeCollectionAlerts().length} open alerts</small></div><div class="form-grid setup-details-grid"><div class="field"><label>Collection name</label><input id="setupCollectionName" value="${esc(state.collectionName)}"></div><div class="field"><label>Collection code <em>optional</em></label><input id="setupCollectionCode" value="${esc(state.collectionCode||'')}"></div></div><div class="setup-action-grid"><button class="setup-action" id="setupNewCollection"><span>＋</span><strong>Guided new collection</strong><small>Create storage and a first box in four steps.</small></button><button class="setup-action" id="setupRestoreBackup"><span>⇧</span><strong>Restore backup</strong><small>Validate and preview a V3 or V4 JSON backup.</small></button><button class="setup-action" id="setupLoadDemo"><span>🪲</span><strong>Load demo collection</strong><small>Return to the complete example workspace.</small></button><button class="setup-action" id="setupDownloadBackup"><span>⇩</span><strong>Download backup</strong><small>Save all local collection data as JSON.</small></button><button class="setup-action" id="setupTrash"><span>♻</span><strong>Trash & recovery</strong><small>${trashCount} recoverable item${trashCount===1?'':'s'}.</small></button><button class="setup-action" id="setupAutoSnapshot" ${snapshot?'':'disabled'}><span>↶</span><strong>Pre-import snapshot</strong><small>${snapshot?`Saved ${esc(new Date(snapshot.savedAt).toLocaleString())}`:'No automatic snapshot yet.'}</small></button><button class="setup-action" id="setupDiagnostics"><span>⌁</span><strong>Beta diagnostics</strong><small>Run 100 / 1,000 / 10,000-record benchmarks without changing data.</small></button><button class="setup-action" id="setupPrivacy"><span>ⓘ</span><strong>About & privacy</strong><small>Read the scope and local-storage limitations.</small></button></div>`,foot:'<button class="btn" data-close-modal>Close</button><button class="btn primary" id="saveCollectionDetails">Save collection details</button>'});
+    $('#saveCollectionDetails').onclick=()=>{state.collectionName=$('#setupCollectionName').value.trim()||'My Entomology Collection';state.collectionCode=$('#setupCollectionCode').value.trim();persist('Collection details saved');closeModal();renderAll();toast('Collection details updated');};
+    $('#setupNewCollection').onclick=()=>openNewCollectionWizard();$('#setupRestoreBackup').onclick=()=>{$('#backupFileInput').dataset.context='setup';$('#backupFileInput').click();};$('#setupLoadDemo').onclick=openDemoConfirmation;$('#setupDownloadBackup').onclick=exportBackup;$('#setupTrash').onclick=openTrashRecovery;$('#setupDiagnostics').onclick=openDiagnostics;$('#setupPrivacy').onclick=openAbout;
+    if(snapshot)$('#setupAutoSnapshot').onclick=()=>previewRestoreBackup(snapshot.state,{label:'automatic pre-import snapshot'});
+  }
+
+  function validateBackupData(parsed) {
+    if(!parsed||![3,4].includes(parsed.version)||!Array.isArray(parsed.locations)||!Array.isArray(parsed.boxes)||!Array.isArray(parsed.zones)||!Array.isArray(parsed.specimens))throw new Error('This is not a compatible EntoBox V3 or V4 backup.');
+    const ids=[];for(const group of [parsed.locations,parsed.boxes,parsed.zones,parsed.specimens])for(const item of group){if(!item||typeof item!=='object'||!item.id)throw new Error('The backup contains an item without an ID.');ids.push(item.id);}if(new Set(ids).size!==ids.length)throw new Error('The backup contains duplicate object IDs.');
+    if(parsed.specimens.some(s=>s.x!=null&&(!Number.isFinite(+s.x)||+s.x<0||+s.x>100||!Number.isFinite(+s.y)||+s.y<0||+s.y>100)))throw new Error('The backup contains invalid specimen coordinates.');
+    return parsed;
+  }
+
+  function previewRestoreBackup(parsed,{label='backup'}={}) {
+    const destructive=collectionHasData();showModal({eyebrow:'Restore data',title:`Restore ${label}?`,locked:welcomePending,body:`<div class="workspace-status-card"><strong>${esc(parsed.collectionName||'EntoBox collection')}</strong><small>${parsed.specimens.length} specimens · ${parsed.boxes.length} boxes · ${parsed.locations.length} storage locations</small></div>${destructive?'<div class="destructive-note"><strong>The current browser workspace will be replaced.</strong><span>Download a backup first if you need to preserve it.</span></div><label class="replace-confirm"><input type="checkbox" id="restoreReplaceConfirm"><span>I understand that the current workspace will be replaced.</span></label>':''}`,foot:`${destructive?'<button class="btn" id="restoreCurrentBackup">⇩ Backup current data</button>':''}<span class="modal-spacer"></span><button class="btn" id="restoreCancelBtn">Cancel</button><button class="btn primary" id="confirmRestoreBtn">Restore</button>`});
+    if($('#restoreCurrentBackup'))$('#restoreCurrentBackup').onclick=exportBackup;$('#restoreCancelBtn').onclick=()=>welcomePending?openWelcomeModal():closeModal();$('#confirmRestoreBtn').onclick=()=>{if(destructive&&!$('#restoreReplaceConfirm').checked)return toast('Please confirm replacement of the current workspace','warn');replaceWorkspace(parsed,'Backup restored');toast(`Backup restored: ${parsed.collectionName||'EntoBox collection'}`);};
   }
 
   async function restoreBackupFile(file) {
-    if(!file)return;
-    try{
-      const parsed=JSON.parse(await file.text());
-      if(!parsed||parsed.version!==3||!Array.isArray(parsed.locations)||!Array.isArray(parsed.boxes)||!Array.isArray(parsed.zones)||!Array.isArray(parsed.specimens))throw new Error('This is not a compatible EntoBox V3 backup.');
-      replaceWorkspace(parsed,'Backup restored');
-      toast(`Backup restored: ${parsed.collectionName||'EntoBox collection'}`);
-    }catch(error){
-      toast(error.message||'Could not restore this backup','error');
-      if(welcomePending)setTimeout(openWelcomeModal,80);
-    }
+    if(!file)return;try{const parsed=validateBackupData(JSON.parse(await file.text()));previewRestoreBackup(parsed,{label:file.name});}catch(error){toast(error.message||'Could not restore this backup','error');if(welcomePending)setTimeout(openWelcomeModal,80);}
+  }
+
+  function openAbout() {
+    showModal({eyebrow:'EntoBox V4 Beta',title:'About & data privacy',body:`<div class="privacy-grid"><div class="privacy-card"><strong>Local-first storage</strong><small>Collection records and compressed image previews stay in this browser. EntoBox does not upload them to a server in this beta.</small></div><div class="privacy-card"><strong>Backups are essential</strong><small>Clearing site data, using another browser, or changing devices does not move the collection automatically. Export JSON backups regularly.</small></div><div class="privacy-card"><strong>Beta scope</strong><small>Designed for personal, teaching, and small institutional collection testing. It is not yet a replacement for a production museum CMS.</small></div><div class="privacy-card"><strong>Feedback privacy</strong><small>The feedback form adds version, browser, screen, and record counts only. It excludes specimen fields and photographs.</small></div></div><div class="local-first-note">Version ${APP_VERSION}. Cloud sync, institutional roles, AI identification, loans, and publication integrations are intentionally outside this beta.</div>`,foot:'<button class="btn" data-close-modal>Close</button><button class="btn primary" id="aboutBackupBtn">Download backup</button>'});$('#aboutBackupBtn').onclick=exportBackup;
+  }
+
+  function feedbackContext() {return {appVersion:APP_VERSION,createdAt:nowISO(),screen:currentView,editMode:state.preferences.editMode,browser:navigator.userAgent,viewport:`${window.innerWidth}×${window.innerHeight}`,counts:{specimens:state.specimens.length,boxes:state.boxes.length,locations:state.locations.length,alerts:activeCollectionAlerts().length},note:'No specimen fields or photographs are included.'};}
+
+  function openFeedback() {
+    showModal({eyebrow:'EntoBox beta feedback',title:'Tell us what happened',body:`<div class="form-grid"><div class="field"><label>Category</label><select id="feedbackCategory"><option>Bug</option><option>Confusing</option><option>Missing feature</option><option>Idea</option></select></div><div class="field full"><label>What were you trying to do?</label><textarea id="feedbackTrying"></textarea></div><div class="field full"><label>What happened?</label><textarea id="feedbackHappened"></textarea></div><div class="field full"><label>What did you expect?</label><textarea id="feedbackExpected"></textarea></div></div><div class="feedback-context">Technical context: <code>${esc(JSON.stringify(feedbackContext()))}</code></div>`,foot:'<button class="btn" data-close-modal>Cancel</button><button class="btn" id="feedbackDownload">Download JSON</button><button class="btn" id="feedbackCopy">Copy</button><button class="btn primary" id="feedbackGithub">Open GitHub issue</button>'});
+    const payload=()=>({category:$('#feedbackCategory').value,trying:$('#feedbackTrying').value.trim(),happened:$('#feedbackHappened').value.trim(),expected:$('#feedbackExpected').value.trim(),context:feedbackContext()});const text=()=>JSON.stringify(payload(),null,2);
+    $('#feedbackDownload').onclick=()=>downloadBlob(new Blob([text()],{type:'application/json'}),`entobox-feedback-${Date.now()}.json`);$('#feedbackCopy').onclick=async()=>{try{await navigator.clipboard.writeText(text());toast('Feedback copied');}catch{toast('Could not access the clipboard','warn');}};$('#feedbackGithub').onclick=()=>{const p=payload(),title=encodeURIComponent(`[V4 Beta] ${p.category}: ${p.trying||'Feedback'}`),body=encodeURIComponent(`### What I was trying to do\n${p.trying}\n\n### What happened\n${p.happened}\n\n### What I expected\n${p.expected}\n\n### Technical context\n\`\`\`json\n${JSON.stringify(p.context,null,2)}\n\`\`\``);window.open(`https://github.com/SaniyaSani/EntoBox/issues/new?title=${title}&body=${body}`,'_blank','noopener');};
+  }
+
+  function runBenchmark(size) {const names=['Carabus auratus','Rosalia alpina','Bombus pascuorum','Tachina fera','Unidentified specimen'];const data=Array.from({length:size},(_,i)=>({id:`test-${i}`,catalogNumber:`TEST-${String(i).padStart(6,'0')}`,scientificName:names[i%names.length],locality:`Locality ${i%200}`,x:i%100,y:(i*7)%100}));const t0=performance.now();const filtered=data.filter(x=>`${x.catalogNumber} ${x.scientificName} ${x.locality}`.toLowerCase().includes('carabus'));const searchMs=performance.now()-t0;const t1=performance.now();JSON.stringify(data);const jsonMs=performance.now()-t1;return {size,searchMs,jsonMs,matches:filtered.length};}
+
+  function openDiagnostics() {
+    showModal({eyebrow:'Beta diagnostics',title:'Local performance benchmark',body:`<div class="import-note">Runs entirely in memory and does not add records to your collection.</div><div class="action-stack"><button class="btn" data-benchmark="100">Run 100 records</button><button class="btn" data-benchmark="1000">Run 1,000 records</button><button class="btn primary" data-benchmark="10000">Run 10,000 records</button></div><div class="benchmark-results" id="benchmarkResults"></div>`,foot:'<button class="btn" data-close-modal>Close</button>'});$$('[data-benchmark]').forEach(b=>b.onclick=()=>{const result=runBenchmark(+b.dataset.benchmark),max=Math.max(result.searchMs,result.jsonMs,1);$('#benchmarkResults').insertAdjacentHTML('beforeend',`<div class="benchmark-row"><b>${result.size.toLocaleString()}</b><div><div class="benchmark-bar"><span style="width:${Math.min(100,max*5)}%"></span></div><small>Search ${result.searchMs.toFixed(2)} ms · JSON ${result.jsonMs.toFixed(2)} ms · ${result.matches} matches</small></div><strong>${(result.searchMs+result.jsonMs).toFixed(2)} ms</strong></div>`);});
   }
 
   function detectHeaderIndex(rows) {
@@ -1531,35 +1816,116 @@
   }
   function excelDateToISO(v){if(typeof v==='number'&&v>1000&&v<100000){const d=new Date(Math.round((v-25569)*86400*1000));return Number.isNaN(d.getTime())?'':d.toISOString().slice(0,10);}return String(v??'').trim();}
   function commitSpreadsheetImport() {
+    if(!pendingImport||!currentBox())return toast('Open a box before importing records','warn');
     const rows=pendingImport.rows;let added=0,generated=0;pushHistory();
+    try { localStorage.setItem(PRE_IMPORT_KEY, JSON.stringify({savedAt:nowISO(),state:deepClone(state)})); } catch {}
     for(const row of rows){
       let cat=String(mapped(row,'catalogNumber')??'').trim();if(!cat){cat=nextTemporaryNumber();generated++;}
       while(state.specimens.some(s=>String(s.catalogNumber||'').toLowerCase()===cat.toLowerCase()))cat=`${cat}-D${Math.floor(Math.random()*900+100)}`;
       const sizeKey=String(mapped(row,'sizeClass')||'m').trim().toLowerCase();const preset=sizePresets[sizeKey]||sizePresets.m;const w=Number(mapped(row,'footprintWidthMm'))||preset.w,h=Number(mapped(row,'footprintHeightMm'))||preset.h;
-      state.specimens.push(specimen({catalogNumber:cat,scientificName:String(mapped(row,'scientificName')||'Unidentified specimen').trim(),collectionCode:String(mapped(row,'collectionCode')||'').trim(),locality:String(mapped(row,'locality')||'').trim(),recordedBy:String(mapped(row,'recordedBy')||'').trim(),eventDate:excelDateToISO(mapped(row,'eventDate')),identifiedBy:String(mapped(row,'identifiedBy')||'').trim(),condition:String(mapped(row,'condition')||'Not assessed').trim(),notes:String(mapped(row,'notes')||'').trim(),targetBoxId:currentBox().id,footprintWidthMm:w,footprintHeightMm:h}));added++;
+      const item=specimen({catalogNumber:cat,scientificName:String(mapped(row,'scientificName')||'Unidentified specimen').trim()||'Unidentified specimen',collectionCode:String(mapped(row,'collectionCode')||'').trim(),locality:String(mapped(row,'locality')||'').trim(),recordedBy:String(mapped(row,'recordedBy')||'').trim(),eventDate:excelDateToISO(mapped(row,'eventDate')),identifiedBy:String(mapped(row,'identifiedBy')||'').trim(),condition:String(mapped(row,'condition')||'Not assessed').trim(),notes:String(mapped(row,'notes')||'').trim(),targetBoxId:currentBox().id,footprintWidthMm:w,footprintHeightMm:h,placementStatus:'active'});
+      state.specimens.push(item);recordActivity('import',item.id,`Imported to placement tray for ${currentBox().code}`,{file:pendingImport.fileName});added++;
     }
-    pendingImport=null;persist();closeModal();renderAll();toast(`${added} records imported to the placement tray${generated?` · ${generated} temporary IDs generated`:''}`);
+    state.meta.importedOnce=true;
+    pendingImport=null;persist('Import saved');closeModal();renderAll();toast(`${added} records imported to the placement tray${generated?` · ${generated} temporary IDs generated`:''}`);
+  }
+
+  const tourSteps = [
+    {
+      title:'Your collection at a glance',
+      text:'Home brings collection health, storage, unfinished work, and alerts into one overview. Every card is a shortcut into the underlying records.',
+      selector:'#homeOverviewSection',
+      prepare:()=>{currentView='home';state.preferences.navOpen=false;renderAll();}
+    },
+    {
+      title:'Open a spatial box',
+      text:'A box is a full-screen spatial workspace. The photograph, free-form pin positions, zones, and specimen cards all stay connected.',
+      selector:'#boxStage',
+      prepare:()=>{const box=currentBox()||state.boxes[0];if(box){state.selectedBoxId=box.id;currentView='workspace';state.preferences.navOpen=false;renderAll();}}
+    },
+    {
+      title:'Browse safely, arrange deliberately',
+      text:'Browse prevents accidental movement. Switch to Arrange only when placing records, moving pins, drawing zones, or changing the box photograph.',
+      selector:'#editModeToggle',
+      prepare:()=>{currentView='workspace';state.preferences.navOpen=false;state.preferences.editMode='browse';renderAll();}
+    },
+    {
+      title:'Import and place spreadsheet records',
+      text:'Open the Collection drawer, import Excel/CSV, filter or select records in the placement tray, then drag or auto-place them into this box.',
+      selector:'#importBtn',
+      prepare:()=>{currentView='workspace';state.preferences.navOpen=true;renderAll();}
+    },
+    {
+      title:'Act on collection-care alerts',
+      text:'Alerts link an issue to its specimen, box, and storage path. Open one to locate the object, document the response, and keep a resolution history.',
+      selector:'#homeAlertsSection',
+      prepare:()=>{currentView='home';state.preferences.navOpen=false;renderAll();}
+    }
+  ];
+
+  function clearTourHighlight(){ $$('.tour-highlight').forEach(el=>el.classList.remove('tour-highlight')); }
+
+  function positionTourCard(target) {
+    const card=$('#tourCard'),focus=$('#tourFocus');if(!card||!focus||!target)return;
+    const r=target.getBoundingClientRect(),pad=8;
+    focus.style.left=`${Math.max(4,r.left-pad)}px`;focus.style.top=`${Math.max(4,r.top-pad)}px`;focus.style.width=`${Math.min(innerWidth-8,r.width+pad*2)}px`;focus.style.height=`${Math.min(innerHeight-8,r.height+pad*2)}px`;
+    const cr=card.getBoundingClientRect(),gap=16;
+    let left=clamp(r.right+gap,12,innerWidth-cr.width-12),top=clamp(r.top,12,innerHeight-cr.height-12);
+    if(r.right+gap+cr.width>innerWidth-12){left=clamp(r.left,12,innerWidth-cr.width-12);top=clamp(r.bottom+gap,12,innerHeight-cr.height-12);}
+    if(r.bottom+gap+cr.height>innerHeight-12&&r.top-cr.height-gap>12)top=r.top-cr.height-gap;
+    card.style.left=`${left}px`;card.style.top=`${top}px`;
+  }
+
+  function showTourStep(index) {
+    tourStep=clamp(index,0,tourSteps.length-1);const step=tourSteps[tourStep];step.prepare?.();
+    requestAnimationFrame(()=>requestAnimationFrame(()=>{
+      clearTourHighlight();
+      const target=$(step.selector)||$('#homeBrand');target?.classList.add('tour-highlight');target?.scrollIntoView?.({block:'center',inline:'center'});
+      $('#tourOverlay').hidden=false;$('#tourStepLabel').textContent=`Step ${tourStep+1} of ${tourSteps.length}`;$('#tourTitle').textContent=step.title;$('#tourText').textContent=step.text;$('#tourBackBtn').disabled=tourStep===0;$('#tourNextBtn').textContent=tourStep===tourSteps.length-1?'Finish':'Next';
+      positionTourCard(target);
+    }));
+  }
+
+  function startGuidedTour(){closeModal(true);showTourStep(0);}
+
+  function finishGuidedTour({completed=true}={}) {
+    clearTourHighlight();$('#tourOverlay').hidden=true;tourStep=-1;
+    if(completed){state.meta.tourCompleted=true;persist('Tour completed');renderHome();toast('Guided tour completed');}
   }
 
   // Main UI bindings
   $('#homeBtn').onclick=()=>setView('home');
   $('#homeBrand').onclick=()=>setView('home');
+  $('#aboutBtn').onclick=openAbout;
+  $('#feedbackBtn').onclick=openFeedback;
+  $('#exportBtn').onclick=exportBackup;
+  $('#localBackupBtn').onclick=exportBackup;
+  $('#saveStateLabel').onclick=openAbout;
+  $('#addSpecimenBtn').onclick=()=>currentBox()?openAddSpecimen():openStorageCreateMenu(null);
+
   $('#homeOpenCurrentBoxBtn').onclick=()=>currentBox()?openBoxWorkspace(currentBox().id):openStorageCreateMenu(null);
   $('#homeCollectionSetupBtn').onclick=openCollectionSetup;
   $('#homeStartOwnBtn').onclick=()=>openNewCollectionWizard();
   $('#homeManageStorageBtn').onclick=()=>{if(!currentBox()&&!state.locations.length)return openStorageCreateMenu(null);currentView='workspace';state.preferences.navOpen=true;persist();renderAll();};
   $('#homeOpenStructureBtn').onclick=()=>{currentView='workspace';state.preferences.navOpen=true;persist();renderAll();};
   $('#homeCreateStorageBtn').onclick=()=>openStorageCreateMenu(null);
-  $('#homeShowAllAlertsBtn').onclick=()=>{homeAlertsExpanded=!homeAlertsExpanded;renderHome();};
+  $('#homeShowAllAlertsBtn').onclick=()=>openAlertsCenter();
+  $('#startTourBtn').onclick=startGuidedTour;
+  $('#hideGettingStartedBtn').onclick=()=>{state.preferences.gettingStartedHidden=true;persist('Checklist hidden');renderHome();};
   $$('[data-home-jump]').forEach(button=>button.onclick=()=>{
     const target=button.dataset.homeJump;
-    if(target==='alerts')return scrollHomeTo('homeAlertsSection');
+    if(target==='alerts')return openAlertsCenter();
     if(target==='boxes')return scrollHomeTo('homeOverviewSection');
     if(target==='storage'){currentView='workspace';state.preferences.navOpen=true;persist();return renderAll();}
     if(target==='specimens')return openCollectionRecords('all');
     if(target==='unidentified')return openCollectionRecords('unidentified');
     if(target==='unplaced')return openCollectionRecords('unplaced');
   });
+
+  $('#alertsBackHomeBtn').onclick=()=>setView('home');
+  $('#newGeneralAlertBtn').onclick=()=>openAlertForm();
+  for(const id of ['alertsSearch','alertsStatusFilter','alertsTypeFilter','alertsSeverityFilter']){const el=$(`#${id}`);if(el)el[id==='alertsSearch'?'oninput':'onchange']=renderAlertsCenter;}
+
   $('#collectionNavBtn').onclick=()=>setNavigationOpen(!state.preferences.navOpen);
   $('#currentBoxChip').onclick=()=>setNavigationOpen(true);
   $('#drawerHandle').onclick=()=>setNavigationOpen(true);
@@ -1567,35 +1933,68 @@
   $('#drawerBackdrop').onclick=()=>setNavigationOpen(false);
   $('#structureSearch').oninput=renderBoxes;
   $('#undoBtn').onclick=undo;
-  $('#exportBtn').onclick=exportBackup;
-  $('#addSpecimenBtn').onclick=openAddSpecimen;
   $('#newBoxBtn').onclick=()=>openStorageCreateMenu(currentSuggestedParent());
-  $('#importBtn').onclick=()=>$('#importFileInput').click();
+  $('#importBtn').onclick=()=>currentBox()?$('#importFileInput').click():toast('Create or open a box before importing','warn');
   $('#queueSearch').oninput=renderQueue;
-  $('#autoPlaceBtn').onclick=autoPlace;
-  $('#boxPhotoBtn').onclick=()=>$('#boxPhotoInput').click();
+  $('#queueFilter').onchange=e=>{state.preferences.queueFilter=e.target.value;persist();renderQueue();};
+  $('#queueSelectAll').onchange=e=>{for(const id of visibleQueueIds)e.target.checked?selectedQueueIds.add(id):selectedQueueIds.delete(id);renderQueue();};
+  $$('[data-queue-view]').forEach(button=>button.onclick=()=>{state.preferences.queueView=button.dataset.queueView;persist();renderQueue();});
+  $('#bulkSizeSelect').onchange=applyBulkSize;
+  $('#bulkZoneSelect').onchange=e=>{if(!selectedQueueIds.size)return;pushHistory();for(const id of selectedQueueIds){const item=specimenById(id);if(item)item.preferredZoneId=e.target.value||null;}persist('Preferred zone saved');renderQueue();toast('Preferred zone applied');};
+  $('#bulkAutoPlaceBtn').onclick=()=>autoPlace([...selectedQueueIds],$('#bulkZoneSelect').value||null);
+  $('#bulkSkipBtn').onclick=skipSelectedQueue;
+  $('#finishPlacementBtn').onclick=finishPlacementSession;
+
+  $$('[data-edit-mode]').forEach(button=>button.onclick=()=>{const mode=button.dataset.editMode;state.preferences.editMode=mode;if(mode==='browse'){placingSpecimenId=null;tool='select';zoneDraftState=null;$('#zoneDraft').hidden=true;}persist(`${mode==='browse'?'Browse':'Arrange'} mode`);renderAll();});
+  $$('[data-appearance]').forEach(b=>b.onclick=()=>{state.preferences.appearance=b.dataset.appearance;persist();renderAll();});
+  $('#showZonesToggle').onchange=e=>{state.preferences.showZones=e.target.checked;persist();renderAll();};
+  $('#showGridToggle').onchange=e=>{state.preferences.showGrid=e.target.checked;persist();renderAll();};
+  $('#snapToggle').onchange=e=>{state.preferences.snap=e.target.checked;persist();renderAll();};
+  $('#boxPhotoBtn').onclick=()=>{if(state.preferences.editMode!=='arrange')return toast('Switch to Arrange to change the box photograph','warn');$('#boxPhotoInput').click();};
   $('#newZoneBtn').onclick=startZoneTool;
-  $('#fitBtn').onclick=()=>{state.preferences.zoom=100;persist();renderAll();};
+  $('#fitBtn').onclick=fitBoxToScreen;
+  $('#centerBtn').onclick=()=>centerBoxInView({behavior:'smooth'});
+  $('#zoomRange').oninput=e=>setZoom(+e.target.value);
+  $('#zoomOutBtn').onclick=()=>setZoom(state.preferences.zoom-10);
+  $('#zoomInBtn').onclick=()=>setZoom(state.preferences.zoom+10);
+  $('#zoom100Btn').onclick=()=>setZoom(100);
+  $('#locateSelectedBtn').onclick=()=>locateSelectedSpecimen(true);
   $('#boxPhotoInput').onchange=e=>{handleBoxPhoto(e.target.files[0]);e.target.value='';};
   $('#importFileInput').onchange=e=>{if(e.target.files[0])loadSpreadsheet(e.target.files[0]);e.target.value='';};
   $('#backupFileInput').onchange=e=>{const file=e.target.files[0];e.target.value='';if(file)restoreBackupFile(file);};
   $('#modalClose').onclick=()=>closeModal();
   $('#modalBackdrop').onclick=e=>{if(e.target===$('#modalBackdrop'))closeModal();};
-  $$('[data-appearance]').forEach(b=>b.onclick=()=>{state.preferences.appearance=b.dataset.appearance;persist();renderAll();});
-  $('#showZonesToggle').onchange=e=>{state.preferences.showZones=e.target.checked;persist();renderAll();};
-  $('#showGridToggle').onchange=e=>{state.preferences.showGrid=e.target.checked;persist();renderAll();};
-  $('#snapToggle').onchange=e=>{state.preferences.snap=e.target.checked;persist();renderAll();};
-  $('#zoomRange').oninput=e=>{state.preferences.zoom=+e.target.value;persist();renderMap();renderControls();};
   $$('.inspector-tabs button').forEach(b=>b.onclick=()=>{inspectorTab=b.dataset.inspectorTab;renderInspector();});
+
   $('#boxStage').onpointerdown=handleStagePointerDown;
   $('#boxStage').onpointermove=handleStagePointerMove;
   $('#boxStage').onpointerup=handleStagePointerUp;
-  $('#boxStage').ondragover=e=>{e.preventDefault();$('#boxStage').classList.add('drag-target');e.dataTransfer.dropEffect='move';};
+  $('#boxStage').onpointercancel=()=>{zoneDraftState=null;$('#zoneDraft').hidden=true;};
+  $('#boxStage').ondragover=e=>{if(state.preferences.editMode!=='arrange')return;e.preventDefault();$('#boxStage').classList.add('drag-target');e.dataTransfer.dropEffect='move';};
   $('#boxStage').ondragleave=e=>{if(!$('#boxStage').contains(e.relatedTarget))$('#boxStage').classList.remove('drag-target');};
-  $('#boxStage').ondrop=e=>{e.preventDefault();$('#boxStage').classList.remove('drag-target');const id=e.dataTransfer.getData('text/entobox-specimen');if(id){const p=pointFromEvent(e);placeSpecimenAt(id,p.x,p.y);}};
-  document.addEventListener('keydown',e=>{if(e.key==='Escape'){placingSpecimenId=null;tool='select';zoneDraftState=null;$('#zoneDraft').hidden=true;renderAll();}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();undo();}});
+  $('#boxStage').ondrop=e=>{e.preventDefault();$('#boxStage').classList.remove('drag-target');if(state.preferences.editMode!=='arrange')return toast('Switch to Arrange to place specimens','warn');const id=e.dataTransfer.getData('text/entobox-specimen');if(id){const p=pointFromEvent(e);placeSpecimenAt(id,p.x,p.y);}};
+  $('#canvasScroll').addEventListener('pointerdown',startCanvasPan);
+  $('#canvasScroll').addEventListener('pointermove',moveCanvasPan);
+  $('#canvasScroll').addEventListener('pointerup',endCanvasPan);
+  $('#canvasScroll').addEventListener('pointercancel',endCanvasPan);
+  $('#canvasScroll').addEventListener('scroll',updateMinimapViewport,{passive:true});
+  $('#canvasScroll').addEventListener('wheel',handleCanvasWheel,{passive:false});
+  $('#minimapSurface').addEventListener('pointerdown',handleMinimapPointer);
+
+  $('#tourSkipBtn').onclick=()=>finishGuidedTour({completed:false});
+  $('#tourBackBtn').onclick=()=>showTourStep(tourStep-1);
+  $('#tourNextBtn').onclick=()=>tourStep>=tourSteps.length-1?finishGuidedTour():showTourStep(tourStep+1);
+
+  document.addEventListener('keydown',e=>{
+    if(e.code==='Space'&&!/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName||'')){spacePressed=true;$('#canvasScroll')?.classList.add('pan-ready');e.preventDefault();}
+    if(e.key==='Escape'){if(tourStep>=0)return finishGuidedTour({completed:false});placingSpecimenId=null;tool='select';zoneDraftState=null;$('#zoneDraft').hidden=true;renderAll();}
+    if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();undo();}
+  });
+  document.addEventListener('keyup',e=>{if(e.code==='Space'){spacePressed=false;$('#canvasScroll')?.classList.remove('pan-ready');}});
+  window.addEventListener('resize',()=>{updateMinimapViewport();if(tourStep>=0){const step=tourSteps[tourStep],target=$(step.selector)||$('#homeBrand');positionTourCard(target);}});
 
   renderAll();
-  if(welcomePending)requestAnimationFrame(openWelcomeModal);
+  requestAnimationFrame(()=>fitBoxToScreen());
+  requestAnimationFrame(openWelcomeModal);
   if('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(()=>{});
 })();

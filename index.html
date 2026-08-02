@@ -4,11 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#123b3c">
-  <meta name="description" content="EntoBox V3.6 collection onboarding, dashboard, and spatial specimen map prototype">
+  <meta name="description" content="EntoBox V4 Beta Test Edition — local-first spatial collection management">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
-  <title>EntoBox V3.6 — Start Your Collection</title>
+  <title>EntoBox V4.4 Beta — Bugfix Edition</title>
 </head>
 <body>
   <div class="app-shell">
@@ -16,8 +16,8 @@
       <button class="brand brand-button" id="homeBrand" title="Go to collection home" aria-label="Go to collection home">
         <div class="brand-mark">EB</div>
         <div>
-          <div class="brand-line">EntoBox <span>V3.6 start your collection</span></div>
-          <div class="brand-sub">Clean start · demo workspace · collection overview · free-form specimen maps</div>
+          <div class="brand-line">EntoBox <span>V4.4 beta bugfix edition</span></div>
+          <div class="brand-sub">Guided setup · safe local data · spatial boxes · actionable collection alerts</div>
         </div>
       </button>
       <div class="top-actions">
@@ -25,6 +25,8 @@
         <button class="btn subtle workspace-only collection-toggle" id="collectionNavBtn" aria-expanded="true" aria-controls="leftPanel">☰ Collection</button>
         <button class="btn subtle workspace-only current-box-chip" id="currentBoxChip" title="Open collection structure">BOX</button>
         <button class="btn subtle workspace-only" id="undoBtn" title="Undo last spatial change">↶ Undo</button>
+        <button class="btn subtle" id="aboutBtn" title="About EntoBox and data privacy">ⓘ About</button>
+        <button class="btn subtle" id="feedbackBtn" title="Send beta feedback">✦ Feedback</button>
         <button class="btn subtle" id="exportBtn">⇩ Backup</button>
         <button class="btn primary" id="addSpecimenBtn">＋ Add specimen</button>
       </div>
@@ -48,6 +50,17 @@
             <button class="btn primary" id="homeOpenCurrentBoxBtn">Open current box</button>
           </div>
         </section>
+
+        <section class="getting-started panel" id="gettingStartedPanel">
+          <div class="getting-started-head">
+            <div><div class="eyebrow">Beta checklist</div><h2>Getting started <span id="gettingStartedCount">0 of 5</span></h2></div>
+            <div class="getting-started-actions"><button class="btn tiny" id="startTourBtn">▶ Guided tour</button><button class="btn tiny" id="hideGettingStartedBtn">Hide</button></div>
+          </div>
+          <div class="getting-started-progress"><span id="gettingStartedProgress"></span></div>
+          <div class="getting-started-tasks" id="gettingStartedTasks"></div>
+        </section>
+
+        <div class="local-data-banner" id="localDataBanner"><span>●</span><div><strong>Local beta workspace</strong><small>Your collection is stored only in this browser. Download a backup before switching devices or clearing browser data.</small></div><button class="btn tiny" id="localBackupBtn">Download backup</button></div>
 
         <section class="home-stat-grid" aria-label="Collection statistics">
           <button class="home-stat-card panel" data-home-jump="specimens"><span class="home-stat-icon">🪲</span><span><b id="homeTotalSpecimens">0</b><small>Total specimens</small></span></button>
@@ -89,6 +102,26 @@
       </div>
     </section>
 
+    <section class="alerts-view" id="alertsView" hidden aria-label="Collection alerts centre">
+      <div class="alerts-shell">
+        <header class="alerts-page-head panel">
+          <div><button class="text-action" id="alertsBackHomeBtn">← Collection home</button><div class="eyebrow">Collection care</div><h1>Alerts centre</h1><p>Review, locate, resolve, and document issues without losing the physical context of the collection.</p></div>
+          <div class="alerts-page-actions"><span class="beta-chip">V4.4 beta</span><button class="btn" id="newGeneralAlertBtn">＋ New alert</button></div>
+        </header>
+        <div class="alerts-filter-bar panel">
+          <input class="input" id="alertsSearch" placeholder="Search specimen, box, path, or alert…">
+          <select id="alertsStatusFilter"><option value="open">Open</option><option value="resolved">Resolved</option><option value="all">All statuses</option></select>
+          <select id="alertsTypeFilter"><option value="all">All categories</option><option>Pest risk</option><option>Damage</option><option>Missing</option><option>Loose label</option><option>Needs inspection</option><option>Other</option></select>
+          <select id="alertsSeverityFilter"><option value="all">All severities</option><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select>
+          <span class="alerts-filter-count" id="alertsFilterCount">0 alerts</span>
+        </div>
+        <div class="alerts-page-grid">
+          <section class="alerts-list-panel panel"><div class="alerts-list" id="alertsList"></div></section>
+          <aside class="alert-detail-panel panel" id="alertDetailPanel"></aside>
+        </div>
+      </div>
+    </section>
+
     <main class="workspace-grid" id="workspaceView">
       <aside class="left-panel panel" id="leftPanel" aria-label="Collection structure and placement tray">
         <section class="panel-section box-section">
@@ -114,11 +147,24 @@
             </div>
             <button class="icon-btn" id="importBtn" title="Import CSV or Excel">⇧</button>
           </div>
-          <div class="tray-toolbar">
+          <div class="tray-session-summary" id="traySessionSummary"><span><b id="trayPlacedCount">0</b> placed</span><span><b id="trayRemainingCount">0</b> remaining</span><span><b id="traySkippedCount">0</b> skipped</span></div>
+          <div class="tray-toolbar beta-tray-toolbar">
             <input id="queueSearch" class="input" placeholder="Search imported specimens…">
-            <button class="btn tiny" id="autoPlaceBtn">Auto-place</button>
+            <select id="queueFilter" title="Filter placement tray"><option value="active">Active</option><option value="all">All</option><option value="unidentified">Unidentified</option><option value="identified">Identified</option><option value="with-photo">With photo</option><option value="without-photo">Without photo</option><option value="skipped">Skipped</option></select>
           </div>
-          <div class="tray-help" id="trayHelp">Drag the beetle handle onto the box, or press <b>Place</b> and tap the photograph.</div>
+          <div class="tray-view-row">
+            <label class="queue-select-all"><input type="checkbox" id="queueSelectAll"> Select visible</label>
+            <div class="segmented mini" id="queueViewToggle"><button data-queue-view="compact" class="active">Compact</button><button data-queue-view="detailed">Details</button></div>
+            <button class="btn tiny" id="finishPlacementBtn">Finish session</button>
+          </div>
+          <div class="queue-bulk-bar" id="queueBulkBar" hidden>
+            <strong><span id="queueSelectedCount">0</span> selected</strong>
+            <select id="bulkSizeSelect" title="Assign footprint size"><option value="">Size…</option><option value="xs">XS</option><option value="s">S</option><option value="m">M</option><option value="l">L</option><option value="xl">XL</option></select>
+            <select id="bulkZoneSelect" title="Preferred placement zone"><option value="">Any zone</option></select>
+            <button class="btn tiny" id="bulkAutoPlaceBtn">Auto-place selected</button>
+            <button class="btn tiny" id="bulkSkipBtn">Skip for now</button>
+          </div>
+          <div class="tray-help" id="trayHelp">Switch to <b>Arrange</b>, then drag the beetle handle onto the box or press <b>Place</b> and tap the photograph.</div>
           <div class="queue-list" id="queueList"></div>
         </section>
       </aside>
@@ -137,10 +183,15 @@
             <button class="btn" id="boxPhotoBtn">▧ Upload box photo</button>
             <button class="btn" id="newZoneBtn">▱ Draw zone</button>
             <button class="btn" id="fitBtn">Fit</button>
+            <button class="btn" id="centerBtn">Center</button>
           </div>
         </div>
 
         <div class="control-strip">
+          <div class="segmented edit-mode-toggle" id="editModeToggle" aria-label="Box interaction mode">
+            <button data-edit-mode="browse" class="active">🔒 Browse</button>
+            <button data-edit-mode="arrange">✎ Arrange</button>
+          </div>
           <div class="segmented" aria-label="Specimen appearance">
             <button data-appearance="mixed" class="active">Mixed</button>
             <button data-appearance="photos">Photos</button>
@@ -149,8 +200,9 @@
           <label class="switch-label"><input type="checkbox" id="showZonesToggle" checked><span></span>Zones</label>
           <label class="switch-label"><input type="checkbox" id="showGridToggle"><span></span>Grid overlay</label>
           <label class="switch-label"><input type="checkbox" id="snapToggle"><span></span>Snap</label>
-          <div class="zoom-control"><span>−</span><input type="range" id="zoomRange" min="70" max="180" value="100"><span>＋</span></div>
-          <div class="mode-indicator" id="modeIndicator">Select & move</div>
+          <div class="zoom-control"><input type="range" id="zoomRange" min="50" max="300" step="5" value="100"><span id="zoomLabel">100%</span></div>
+          <div class="zoom-buttons"><button class="icon-btn mini" id="zoomOutBtn" title="Zoom out">−</button><button class="btn tiny" id="zoom100Btn">100%</button><button class="icon-btn mini" id="zoomInBtn" title="Zoom in">＋</button><button class="btn tiny" id="locateSelectedBtn" title="Centre selected specimen">◎ Selected</button></div>
+          <div class="mode-indicator" id="modeIndicator">Browse safely</div>
         </div>
 
         <div class="canvas-scroll" id="canvasScroll">
@@ -164,6 +216,7 @@
               <div class="drop-hint" id="dropHint">Drop specimen here</div>
             </div>
           </div>
+          <div class="minimap" id="minimap" aria-label="Box minimap"><div class="minimap-surface" id="minimapSurface"><div class="minimap-zones" id="minimapZones"></div><div class="minimap-specimens" id="minimapSpecimens"></div><div class="minimap-viewport" id="minimapViewport"></div></div></div>
         </div>
 
         <div class="map-footer">
@@ -172,7 +225,7 @@
             <span><i class="legend-footprint"></i>Approximate specimen footprint</span>
             <span><i class="legend-zone"></i>Curatorial zone</span>
           </div>
-          <div id="saveStateLabel">Saved locally</div>
+          <button class="save-state-button" id="saveStateLabel" title="Local data and backup information">Saved locally</button>
         </div>
       </section>
 
@@ -198,6 +251,16 @@
       </div>
       <div class="modal-body" id="modalBody"></div>
       <div class="modal-foot" id="modalFoot"></div>
+    </div>
+  </div>
+
+  <div class="tour-overlay" id="tourOverlay" hidden>
+    <div class="tour-focus" id="tourFocus"></div>
+    <div class="tour-card" id="tourCard" role="dialog" aria-live="polite">
+      <div class="tour-step-label" id="tourStepLabel">Step 1 of 5</div>
+      <h3 id="tourTitle">Welcome</h3>
+      <p id="tourText"></p>
+      <div class="tour-actions"><button class="btn tiny" id="tourSkipBtn">Skip tour</button><span></span><button class="btn tiny" id="tourBackBtn">Back</button><button class="btn primary tiny" id="tourNextBtn">Next</button></div>
     </div>
   </div>
 
