@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '4.5.0-beta';
+  const APP_VERSION = '4.6.0-beta';
   const STATE_KEY = 'entobox-v4-beta-state';
   const LEGACY_STATE_KEY = 'entobox-v3-spatial-state';
   const PRE_IMPORT_KEY = 'entobox-v4-pre-import-backup';
@@ -1996,5 +1996,4 @@
   renderAll();
   requestAnimationFrame(()=>fitBoxToScreen());
   requestAnimationFrame(openWelcomeModal);
-  if('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(()=>{});
 })();

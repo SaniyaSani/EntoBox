@@ -1,4 +1,4 @@
-# EntoBox V4.5 — Beta Bugfix Edition
+# EntoBox V4.6 — Beta Bugfix Edition
 
 EntoBox is a local-first spatial collection tool for answering a deceptively difficult question: **where, physically, is this specimen?**
 
@@ -86,12 +86,17 @@ Ask a tester to:
 A tester completing that without live explanation is the main V4 success criterion.
 
 
-## V4.5 bug fixes
+## V4.6 bug fixes
 - Fixed the **Add specimen** button in the box Details panel.
 - Raised dialogs above the guided-tour overlay so modal buttons remain clickable.
 - Prevented highlighted tour targets from intercepting the tour controls.
 - Corrected singular/plural counts for specimens and placement-tray records.
-- Kept the thin box-frame and corrected centering/navigation changes from V4.5.
+- Kept the thin box-frame and corrected centering/navigation changes from V4.6.
 
 ## Smoke-tested workflows
 The build was automatically exercised in Chromium for launch choices, demo loading, guided-tour controls, box opening, adding to tray, add-and-place, Fit/Center, CSV/XLSX import, storage creation, box creation, alerts, About, and Feedback.
+
+
+## GitHub Pages cache note
+
+V4.6 disables the old cache-first service worker during beta testing. If an older GitHub Pages version is still visible after deployment, open the site once with `?v=4.6` appended to the URL, then reload normally.
