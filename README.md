@@ -1,102 +1,58 @@
-# EntoBox V4.6 — Beta Bugfix Edition
+# EntoKit website
 
-EntoBox is a local-first spatial collection tool for answering a deceptively difficult question: **where, physically, is this specimen?**
+This folder contains a complete static version of the EntoKit portal. It can be
+published free of charge with GitHub Pages and does not need Python, Streamlit,
+Node.js, a database, or a paid server.
 
-It connects a storage hierarchy (building → room → cabinet → drawer → box) with photographs of real boxes, free-form pin positions, placement zones, specimen records, and actionable collection-care alerts.
+## Files
 
-## What V4 includes
+- `index.html` — the website content and links
+- `styles.css` — colours, layout, animations and mobile styling
+- `pinned-beetle.png` — the specimen illustration
+- `.nojekyll` — tells GitHub Pages to serve the files directly
 
-### Guided first use
-- First-run choice: create a collection, explore the demo, or restore a backup.
-- Four-step collection setup wizard with optional storage depth.
-- Five-step guided tour through Home, spatial boxes, safe editing, spreadsheet placement, and alerts.
-- A Getting Started checklist on Collection Home.
+## Publish it on GitHub Pages
 
-### Safer spatial work
-- **Browse** mode prevents accidental specimen movement.
-- **Arrange** mode unlocks placement, dragging, zones, and box-photo changes.
-- Zoom from 50–300%, Fit, 100%, locate selected specimen, pan, and minimap navigation.
-- Free-form specimen footprints remain horizontal and readable.
+1. Sign in to GitHub.
+2. Click the `+` in the upper-right corner and choose **New repository**.
+3. Name the repository `EntoKit`.
+4. Select **Public** and create the repository.
+5. In the empty repository choose **Add file → Upload files**.
+6. Upload the *contents* of this folder: `index.html`, `styles.css`,
+   `pinned-beetle.png`, `.nojekyll`, and `README.md`.
+7. At the bottom of the page click **Commit changes**.
+8. Open **Settings → Pages**.
+9. Under **Build and deployment**, set **Source** to **Deploy from a branch**.
+10. Select branch **main**, folder **/(root)**, and click **Save**.
 
-### Spreadsheet placement workflow
-- Import `.xlsx`, `.csv`, or `.tsv` into a box-specific placement tray.
-- Choose the spreadsheet header row from a table preview.
-- Assemble scientific names from several columns (for example Genus + specific epithet + subspecies).
-- All mappings and identification fields are optional.
-- Filter, multi-select, bulk-size, assign a preferred zone, auto-place, skip for now, and finish a placement session.
+GitHub will show the website address in the Pages settings when publishing is
+complete.
 
-### Collection care and records
-- Dedicated Alerts Centre with category, severity, status, search, exact-location navigation, resolution notes, and history.
-- Structured specimen view: Identity, Collection event, Physical storage, Condition & alerts, Media, and recent activity.
-- Collection Home shows health, alerts, unfinished work, storage, and boxes.
+## Replace the GitHub button
 
-### Local-data safety
-- Saved-locally timestamp.
-- Undo history for recent actions.
-- Recoverable trash for specimens, zones, boxes, and storage locations.
-- Automatic pre-import snapshot.
-- Validated JSON restore with a preview and replacement confirmation.
-- Feedback form that excludes specimen fields and photographs from technical context.
-- In-memory diagnostics for 100, 1,000, and 10,000 records.
+Open `index.html`, search for:
 
-## Important beta limitation
+`https://github.com/YOUR-GITHUB-USERNAME/EntoKit`
 
-V4 stores collection data and compressed image previews **only in this browser**. It does not yet provide accounts, cloud sync, multi-user roles, institutional backups, AI identification, loan management, or data publication integrations.
+Replace `YOUR-GITHUB-USERNAME` with your actual GitHub username, then commit the
+change.
 
-Download JSON backups regularly, especially before clearing browser data or moving to another device.
+## Update tool links later
 
-## GitHub Pages deployment
+Search `index.html` for the tool name. Replace its `href="..."` value with the
+new application address. Tools marked as planned do not have clickable links
+yet.
 
-The ZIP is GitHub-ready: place the extracted contents directly in the repository root so that the structure starts with:
-
-```text
-index.html
-app.js
-styles.css
-manifest.webmanifest
-sw.js
-assets/
-```
-
-Then set GitHub Pages to:
-
-```text
-Source: Deploy from a branch
-Branch: main
-Folder: / (root)
-```
-
-Do not upload one extra wrapper folder around `index.html`.
-
-## Open locally
-
-Open `index.html` directly for basic testing. Camera, installability, service-worker caching, and the best PWA behavior require HTTPS (for example GitHub Pages) or a local HTTP development server.
-
-## Suggested beta-test task
-
-Ask a tester to:
-
-1. Create one collection and one box.
-2. Import ten specimen records.
-3. Place them on a box photograph.
-4. Find one specimen again.
-5. Report and resolve one condition issue.
-6. Export a backup and send feedback.
-
-A tester completing that without live explanation is the main V4 success criterion.
+## License
 
 
-## V4.6 bug fixes
-- Fixed the **Add specimen** button in the box Details panel.
-- Raised dialogs above the guided-tour overlay so modal buttons remain clickable.
-- Prevented highlighted tour targets from intercepting the tour controls.
-- Corrected singular/plural counts for specimens and placement-tray records.
-- Kept the thin box-frame and corrected centering/navigation changes from V4.6.
+EntoKit is licensed under the **PolyForm Noncommercial License 1.0.0**.
 
-## Smoke-tested workflows
-The build was automatically exercised in Chromium for launch choices, demo loading, guided-tour controls, box opening, adding to tray, add-and-place, Fit/Center, CSV/XLSX import, storage creation, box creation, alerts, About, and Feedback.
+You may use, study, modify and distribute the software for permitted non-commercial purposes.
 
+Commercial use, including the incorporation of EntoKit or substantial portions of its code into paid products, commercial services or other commercial projects, requires prior written permission from the copyright holder.
 
-## GitHub Pages cache note
+For commercial licensing inquiries, please contact Sanny.
 
-V4.6 disables the old cache-first service worker during beta testing. If an older GitHub Pages version is still visible after deployment, open the site once with `?v=4.6` appended to the URL, then reload normally.
+Copyright © 2026 Sanny (SaniyaSani).
+

@@ -1,295 +1,304 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="theme-color" content="#123b3c">
-  <meta name="description" content="EntoBox V4 Beta Test Edition — local-first spatial collection management">
-  <link rel="manifest" href="manifest.webmanifest?v=4.6.0">
-  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="styles.css?v=4.6.0">
-  <title>EntoBox V4.6 Beta — GitHub Cache Fix</title>
-</head>
-<body>
-  <div class="app-shell">
-    <header class="topbar">
-      <button class="brand brand-button" id="homeBrand" title="Go to collection home" aria-label="Go to collection home">
-        <div class="brand-mark">EB</div>
-        <div>
-          <div class="brand-line">EntoBox <span>V4.6 beta · GitHub cache fix</span></div>
-          <div class="brand-sub">Guided setup · safe local data · spatial boxes · actionable collection alerts</div>
-        </div>
-      </button>
-      <div class="top-actions">
-        <button class="btn subtle home-toggle" id="homeBtn" title="Collection home">⌂ Home</button>
-        <button class="btn subtle workspace-only collection-toggle" id="collectionNavBtn" aria-expanded="true" aria-controls="leftPanel">☰ Collection</button>
-        <button class="btn subtle workspace-only current-box-chip" id="currentBoxChip" title="Open collection structure">BOX</button>
-        <button class="btn subtle workspace-only" id="undoBtn" title="Undo last spatial change">↶ Undo</button>
-        <button class="btn subtle" id="aboutBtn" title="About EntoBox and data privacy">ⓘ About</button>
-        <button class="btn subtle" id="feedbackBtn" title="Send beta feedback">✦ Feedback</button>
-        <button class="btn subtle" id="exportBtn">⇩ Backup</button>
-        <button class="btn primary" id="addSpecimenBtn">＋ Add specimen</button>
-      </div>
-    </header>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="EntoKit — open tools for better insect collections."
+    />
+    <title>EntoKit — Open entomology tools</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main id="top">
+      <header class="site-header">
+        <a class="brand" href="#top" aria-label="EntoKit home">
+          <span class="brand-flower" aria-hidden="true">✣</span>
+          <span>EntoKit</span>
+        </a>
+        <nav aria-label="Main navigation">
+          <a href="#tools">Tools</a>
+          <a href="#workflow">Workflow</a>
+          <a href="#about">About</a>
+          <a href="#open-source">Open source</a>
+        </nav>
+      </header>
 
-    <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
-    <button class="drawer-handle" id="drawerHandle" title="Open collection structure" aria-label="Open collection structure">☰ <span id="drawerHandleLabel">Collection</span></button>
-
-    <section class="home-view" id="homeView" aria-label="Collection overview">
-      <div class="home-scroll">
-        <section class="home-hero panel">
-          <div>
-            <div class="eyebrow">Collection home</div>
-            <h1 id="homeCollectionName">Natural history collection</h1>
-            <div class="collection-mode-line"><span class="collection-mode-badge" id="homeModeBadge">Your collection</span><button class="text-action" id="homeStartOwnBtn">Start your own collection</button></div>
-            <p>See the health of the whole collection, open alerts in their exact boxes, and jump directly into storage or specimen work.</p>
-          </div>
-          <div class="home-hero-actions">
-            <button class="btn" id="homeCollectionSetupBtn">⚙ Collection setup</button>
-            <button class="btn" id="homeManageStorageBtn">☰ Manage storage</button>
-            <button class="btn primary" id="homeOpenCurrentBoxBtn">Open current box</button>
-          </div>
-        </section>
-
-        <section class="getting-started panel" id="gettingStartedPanel">
-          <div class="getting-started-head">
-            <div><div class="eyebrow">Beta checklist</div><h2>Getting started <span id="gettingStartedCount">0 of 5</span></h2></div>
-            <div class="getting-started-actions"><button class="btn tiny" id="startTourBtn">▶ Guided tour</button><button class="btn tiny" id="hideGettingStartedBtn">Hide</button></div>
-          </div>
-          <div class="getting-started-progress"><span id="gettingStartedProgress"></span></div>
-          <div class="getting-started-tasks" id="gettingStartedTasks"></div>
-        </section>
-
-        <div class="local-data-banner" id="localDataBanner"><span>●</span><div><strong>Local beta workspace</strong><small>Your collection is stored only in this browser. Download a backup before switching devices or clearing browser data.</small></div><button class="btn tiny" id="localBackupBtn">Download backup</button></div>
-
-        <section class="home-stat-grid" aria-label="Collection statistics">
-          <button class="home-stat-card panel" data-home-jump="specimens"><span class="home-stat-icon">🪲</span><span><b id="homeTotalSpecimens">0</b><small>Total specimens</small></span></button>
-          <button class="home-stat-card panel" data-home-jump="boxes"><span class="home-stat-icon">▣</span><span><b id="homeBoxes">0</b><small>Specimen boxes</small></span></button>
-          <button class="home-stat-card panel" data-home-jump="alerts"><span class="home-stat-icon alert-icon">!</span><span><b id="homeAlertsCount">0</b><small>Active alerts</small></span></button>
-          <button class="home-stat-card panel" data-home-jump="unplaced"><span class="home-stat-icon">⇢</span><span><b id="homeUnplaced">0</b><small>Awaiting placement</small></span></button>
-          <button class="home-stat-card panel" data-home-jump="unidentified"><span class="home-stat-icon">?</span><span><b id="homeUnidentified">0</b><small>Unidentified</small></span></button>
-          <button class="home-stat-card panel" data-home-jump="storage"><span class="home-stat-icon">▦</span><span><b id="homeLocations">0</b><small>Storage locations</small></span></button>
-        </section>
-
-        <div class="home-dashboard-grid">
-          <section class="home-card panel health-card" id="homeHealthSection">
-            <div class="home-card-head">
-              <div><div class="eyebrow">Collection health</div><h2>Condition overview</h2></div>
-              <span class="health-summary" id="homeHealthSummary">No active alerts</span>
-            </div>
-            <div class="health-visual" id="homeHealthVisual"></div>
-            <div class="health-breakdown" id="homeHealthBreakdown"></div>
-          </section>
-
-          <section class="home-card panel alerts-card" id="homeAlertsSection">
-            <div class="home-card-head">
-              <div><div class="eyebrow">Action centre</div><h2>Alerts</h2></div>
-              <button class="btn tiny" id="homeShowAllAlertsBtn">Show all</button>
-            </div>
-            <p class="home-card-copy">Open an alert to see the specimen highlighted in its physical box.</p>
-            <div class="home-alert-list" id="homeAlertList"></div>
-          </section>
-        </div>
-
-        <section class="home-card panel overview-card" id="homeOverviewSection">
-          <div class="home-card-head">
-            <div><div class="eyebrow">Collection overview</div><h2>Storage and boxes</h2></div>
-            <div class="overview-actions"><button class="btn tiny" id="homeCreateStorageBtn">＋ Add storage or box</button><button class="btn tiny" id="homeOpenStructureBtn">View full structure</button></div>
-          </div>
-          <div class="storage-summary" id="homeStorageSummary"></div>
-          <div class="home-box-grid" id="homeBoxGrid"></div>
-        </section>
-      </div>
-    </section>
-
-    <section class="alerts-view" id="alertsView" hidden aria-label="Collection alerts centre">
-      <div class="alerts-shell">
-        <header class="alerts-page-head panel">
-          <div><button class="text-action" id="alertsBackHomeBtn">← Collection home</button><div class="eyebrow">Collection care</div><h1>Alerts centre</h1><p>Review, locate, resolve, and document issues without losing the physical context of the collection.</p></div>
-          <div class="alerts-page-actions"><span class="beta-chip">V4.4 beta</span><button class="btn" id="newGeneralAlertBtn">＋ New alert</button></div>
-        </header>
-        <div class="alerts-filter-bar panel">
-          <input class="input" id="alertsSearch" placeholder="Search specimen, box, path, or alert…">
-          <select id="alertsStatusFilter"><option value="open">Open</option><option value="resolved">Resolved</option><option value="all">All statuses</option></select>
-          <select id="alertsTypeFilter"><option value="all">All categories</option><option>Pest risk</option><option>Damage</option><option>Missing</option><option>Loose label</option><option>Needs inspection</option><option>Other</option></select>
-          <select id="alertsSeverityFilter"><option value="all">All severities</option><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select>
-          <span class="alerts-filter-count" id="alertsFilterCount">0 alerts</span>
-        </div>
-        <div class="alerts-page-grid">
-          <section class="alerts-list-panel panel"><div class="alerts-list" id="alertsList"></div></section>
-          <aside class="alert-detail-panel panel" id="alertDetailPanel"></aside>
-        </div>
-      </div>
-    </section>
-
-    <main class="workspace-grid" id="workspaceView">
-      <aside class="left-panel panel" id="leftPanel" aria-label="Collection structure and placement tray">
-        <section class="panel-section box-section">
-          <div class="section-head">
-            <div>
-              <div class="eyebrow">Collection navigation</div>
-              <h2>Storage structure</h2>
-            </div>
-            <div class="section-actions">
-              <button class="icon-btn" id="newBoxBtn" title="Add building, storage location, or box">＋</button>
-              <button class="icon-btn" id="closeCollectionNavBtn" title="Close navigation">×</button>
-            </div>
-          </div>
-          <input id="structureSearch" class="input structure-search" placeholder="Find building, cabinet, box…">
-          <div class="storage-tree" id="storageTree"></div>
-        </section>
-
-        <section class="panel-section tray-section">
-          <div class="section-head">
-            <div>
-              <div class="eyebrow">Unplaced records</div>
-              <h2>Placement tray <span class="count-badge" id="queueCount">0</span></h2>
-            </div>
-            <button class="icon-btn" id="importBtn" title="Import CSV or Excel">⇧</button>
-          </div>
-          <div class="tray-session-summary" id="traySessionSummary"><span><b id="trayPlacedCount">0</b> placed</span><span><b id="trayRemainingCount">0</b> remaining</span><span><b id="traySkippedCount">0</b> skipped</span></div>
-          <div class="tray-toolbar beta-tray-toolbar">
-            <input id="queueSearch" class="input" placeholder="Search imported specimens…">
-            <select id="queueFilter" title="Filter placement tray"><option value="active">Active</option><option value="all">All</option><option value="unidentified">Unidentified</option><option value="identified">Identified</option><option value="with-photo">With photo</option><option value="without-photo">Without photo</option><option value="skipped">Skipped</option></select>
-          </div>
-          <div class="tray-view-row">
-            <label class="queue-select-all"><input type="checkbox" id="queueSelectAll"> Select visible</label>
-            <div class="segmented mini" id="queueViewToggle"><button data-queue-view="compact" class="active">Compact</button><button data-queue-view="detailed">Details</button></div>
-            <button class="btn tiny" id="finishPlacementBtn">Finish session</button>
-          </div>
-          <div class="queue-bulk-bar" id="queueBulkBar" hidden>
-            <strong><span id="queueSelectedCount">0</span> selected</strong>
-            <select id="bulkSizeSelect" title="Assign footprint size"><option value="">Size…</option><option value="xs">XS</option><option value="s">S</option><option value="m">M</option><option value="l">L</option><option value="xl">XL</option></select>
-            <select id="bulkZoneSelect" title="Preferred placement zone"><option value="">Any zone</option></select>
-            <button class="btn tiny" id="bulkAutoPlaceBtn">Auto-place selected</button>
-            <button class="btn tiny" id="bulkSkipBtn">Skip for now</button>
-          </div>
-          <div class="tray-help" id="trayHelp">Switch to <b>Arrange</b>, then drag the beetle handle onto the box or press <b>Place</b> and tap the photograph.</div>
-          <div class="queue-list" id="queueList"></div>
-        </section>
-      </aside>
-
-      <section class="map-panel panel">
-        <div class="map-header">
-          <div>
-            <div class="breadcrumb" id="boxBreadcrumb">Institution › Cabinet › Drawer</div>
-            <div class="map-title-row">
-              <h1 id="currentBoxTitle">Box</h1>
-              <span class="status-pill" id="boxStats">0 placed</span>
-            </div>
-          </div>
-          <div class="map-actions">
-            <input type="file" id="boxPhotoInput" accept="image/*" hidden>
-            <button class="btn" id="boxPhotoBtn">▧ Upload box photo</button>
-            <button class="btn" id="newZoneBtn">▱ Draw zone</button>
-            <button class="btn" id="fitBtn">Fit</button>
-            <button class="btn" id="centerBtn">Center</button>
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="hand-note hero-kicker">made for real collections</p>
+          <h1 id="hero-title">Open tools for better insect collections.</h1>
+          <p class="hero-intro">
+            Free and open-source tools for field notes, data cleaning,
+            identification and labels—built by and for people who care about
+            insects.
+          </p>
+          <div class="hero-actions">
+            <a
+              class="button button-primary"
+              href="https://entolabel.streamlit.app"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open EntoLabel <span aria-hidden="true">→</span>
+            </a>
+            <a class="button button-secondary" href="#tools">
+              Explore the toolkit <span aria-hidden="true">↓</span>
+            </a>
           </div>
         </div>
 
-        <div class="control-strip">
-          <div class="segmented edit-mode-toggle" id="editModeToggle" aria-label="Box interaction mode">
-            <button data-edit-mode="browse" class="active">🔒 Browse</button>
-            <button data-edit-mode="arrange">✎ Arrange</button>
+        <div class="field-art">
+          <img
+            src="hero-corn-beetles.png"
+            alt="Hand-drawn corn plants with two beetles among the leaves"
+          />
+          <p class="hand-note field-note field-note-left">
+            diurnal<br />on tassel<br />(v. common)
+          </p>
+          <p class="hand-note field-note field-note-right">
+            Corn field edge<br />6 June 2026<br />clouds, warm
+          </p>
+          <div class="scale-note" aria-hidden="true"><span></span>1 cm</div>
+          <div class="palette-dots" aria-hidden="true">
+            <i></i><i></i><i></i><i></i><i></i>
           </div>
-          <div class="segmented" aria-label="Specimen appearance">
-            <button data-appearance="mixed" class="active">Mixed</button>
-            <button data-appearance="photos">Photos</button>
-            <button data-appearance="pins">Pins</button>
-          </div>
-          <label class="switch-label"><input type="checkbox" id="showZonesToggle" checked><span></span>Zones</label>
-          <label class="switch-label"><input type="checkbox" id="showGridToggle"><span></span>Grid overlay</label>
-          <label class="switch-label"><input type="checkbox" id="snapToggle"><span></span>Snap</label>
-          <div class="zoom-control"><input type="range" id="zoomRange" min="50" max="300" step="5" value="100"><span id="zoomLabel">100%</span></div>
-          <div class="zoom-buttons"><button class="icon-btn mini" id="zoomOutBtn" title="Zoom out">−</button><button class="btn tiny" id="zoom100Btn">100%</button><button class="icon-btn mini" id="zoomInBtn" title="Zoom in">＋</button><button class="btn tiny" id="locateSelectedBtn" title="Centre selected specimen">◎ Selected</button></div>
-          <div class="mode-indicator" id="modeIndicator">Browse safely</div>
-        </div>
-
-        <div class="canvas-scroll" id="canvasScroll">
-          <div class="box-stage-wrap" id="boxStageWrap">
-            <div class="box-stage" id="boxStage" tabindex="0" aria-label="Spatial box map">
-              <img class="box-background" id="boxBackground" alt="Box photograph">
-              <div class="grid-overlay" id="gridOverlay"></div>
-              <div class="zone-layer" id="zoneLayer"></div>
-              <div class="specimen-layer" id="specimenLayer"></div>
-              <div class="zone-draft" id="zoneDraft" hidden></div>
-              <div class="drop-hint" id="dropHint">Drop specimen here</div>
-            </div>
-          </div>
-          <div class="minimap" id="minimap" aria-label="Box minimap"><div class="minimap-surface" id="minimapSurface"><div class="minimap-zones" id="minimapZones"></div><div class="minimap-specimens" id="minimapSpecimens"></div><div class="minimap-viewport" id="minimapViewport"></div></div></div>
-        </div>
-
-        <div class="map-footer">
-          <div class="legend">
-            <span><i class="legend-pin"></i>Pin anchor</span>
-            <span><i class="legend-footprint"></i>Approximate specimen footprint</span>
-            <span><i class="legend-zone"></i>Curatorial zone</span>
-          </div>
-          <button class="save-state-button" id="saveStateLabel" title="Local data and backup information">Saved locally</button>
         </div>
       </section>
 
-      <aside class="right-panel panel">
-        <div class="inspector-tabs">
-          <button class="active" data-inspector-tab="details">Details</button>
-          <button data-inspector-tab="zones">Zones</button>
-          <button data-inspector-tab="records">Records</button>
+      <section class="tools-section" id="tools" aria-labelledby="tools-title">
+        <div class="section-intro">
+          <div>
+            <p class="hand-note">choose what you need today</p>
+            <h2 id="tools-title">Five small tools. One specimen journey.</h2>
+          </div>
+          <p>
+            Start with one tool or let the same familiar spreadsheet carry your
+            work from the field to the collection drawer.
+          </p>
         </div>
-        <div class="inspector-body" id="inspectorBody"></div>
-      </aside>
+
+        <div class="tools-grid">
+          <article class="tool-card available">
+            <span class="status-badge available">Available</span>
+            <div class="tool-illustration">
+              <img src="icons/entolabel.png" alt="" aria-hidden="true" />
+            </div>
+            <h3>EntoLabel</h3>
+            <p>
+              Create clean collection and determination labels from Excel or
+              CSV, ready to print on A4.
+            </p>
+            <a
+              class="tool-link"
+              href="https://entolabel.streamlit.app"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open EntoLabel <span aria-hidden="true">↗</span>
+            </a>
+          </article>
+
+          <article class="tool-card building">
+            <span class="status-badge building">In development</span>
+            <div class="tool-illustration">
+              <img src="icons/entofield.png" alt="" aria-hidden="true" />
+            </div>
+            <h3>EntoField</h3>
+            <p>
+              Record collecting events, localities and specimens in the
+              field—even from your phone.
+            </p>
+            <a
+              class="tool-link"
+              href="https://entofield.ssagutdinova.workers.dev/"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Try EntoField <span aria-hidden="true">↗</span>
+            </a>
+          </article>
+
+          <article class="tool-card building">
+            <span class="status-badge building">In development</span>
+            <div class="tool-illustration">
+              <img src="icons/entodata-doctor.png" alt="" aria-hidden="true" />
+            </div>
+            <h3>EntoData Doctor</h3>
+            <p>
+              Find missing values, inconsistent formats and coordinates that
+              need attention.
+            </p>
+            <a
+              class="tool-link"
+              href="https://saniyasani.github.io/entodata-doctor/"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Try EntoData Doctor <span aria-hidden="true">↗</span>
+            </a>
+          </article>
+
+          <article class="tool-card building">
+            <span class="status-badge building">In development</span>
+            <div class="tool-illustration">
+              <img src="icons/entobox.svg" alt="" aria-hidden="true" />
+            </div>
+            <h3>EntoBox</h3>
+            <p>
+              Organize specimen boxes visually, track storage locations and
+              find specimens across your collection.
+            </p>
+            <a
+              class="tool-link"
+              href="https://saniyasani.github.io/EntoBox/"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Try EntoBox <span aria-hidden="true">↗</span>
+            </a>
+          </article>
+
+          <article class="tool-card planned">
+            <span class="status-badge planned">Planned</span>
+            <div class="tool-illustration">
+              <img src="icons/entodet.png" alt="" aria-hidden="true" />
+            </div>
+            <h3>EntoDet</h3>
+            <p>
+              Document identifications, evidence and determination history
+              without losing context.
+            </p>
+            <span class="tool-link muted">
+              On the roadmap <span aria-hidden="true">—</span>
+            </span>
+          </article>
+        </div>
+        <p class="beta-note">
+          EntoField, EntoData Doctor and EntoBox are working prototypes. You
+          are welcome to try them while they are still growing.
+        </p>
+      </section>
+
+      <section
+        class="workflow-section"
+        id="workflow"
+        aria-labelledby="workflow-title"
+      >
+        <div class="brush-edge" aria-hidden="true"></div>
+        <p class="hand-note workflow-kicker">
+          from field note to collection record
+        </p>
+        <h2 id="workflow-title">One connected workflow</h2>
+        <ol class="workflow-grid">
+          <li>
+            <span class="workflow-mark">01</span>
+            <div>
+              <h3>Field notes</h3>
+              <p>Observations, collecting events, photos and context.</p>
+            </div>
+            <span class="workflow-arrow" aria-hidden="true">→</span>
+          </li>
+          <li>
+            <span class="workflow-mark">02</span>
+            <div>
+              <h3>Clean data</h3>
+              <p>Structure and standards make your records reusable.</p>
+            </div>
+            <span class="workflow-arrow" aria-hidden="true">→</span>
+          </li>
+          <li>
+            <span class="workflow-mark">03</span>
+            <div>
+              <h3>Identification</h3>
+              <p>Names, evidence and determinations stay connected.</p>
+            </div>
+            <span class="workflow-arrow" aria-hidden="true">→</span>
+          </li>
+          <li>
+            <span class="workflow-mark">04</span>
+            <div>
+              <h3>Label</h3>
+              <p>Accurate labels turn data into collection records.</p>
+            </div>
+            <span class="workflow-arrow" aria-hidden="true">→</span>
+          </li>
+          <li>
+            <span class="workflow-mark">05</span>
+            <div>
+              <h3>Collection</h3>
+              <p>Keep specimens findable in boxes and storage.</p>
+            </div>
+          </li>
+        </ol>
+      </section>
+
+      <section class="about-section" id="about">
+        <div class="about-art" aria-hidden="true">
+          <span class="pink-stroke"></span>
+          <span class="green-stroke"></span>
+          <span class="blue-stroke"></span>
+          <span class="little-beetle">✣</span>
+        </div>
+        <div class="about-copy">
+          <p class="hand-note">built around specimens, not platforms</p>
+          <h2>Useful tools can feel human.</h2>
+          <p>
+            EntoKit is a growing collection of focused tools for field
+            entomologists, students, private collectors and small scientific
+            collections. It keeps familiar files at the centre, so your data
+            remains understandable, portable and yours.
+          </p>
+          <div class="principles">
+            <div>
+              <strong>Open</strong>
+              <span>Free to use, study and improve.</span>
+            </div>
+            <div>
+              <strong>Focused</strong>
+              <span>One concrete collection problem at a time.</span>
+            </div>
+            <div>
+              <strong>Connected</strong>
+              <span>Excel and CSV remain the bridge between tools.</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="open-source-section" id="open-source">
+        <div>
+          <p class="hand-note">use it · test it · help it grow</p>
+          <h2>Open tools grow through honest feedback.</h2>
+        </div>
+        <div>
+  <p>
+    EntoKit is an open-source toolkit created and maintained by
+    <strong>Sanny</strong>. It is still young, so you are warmly invited
+    to try the tools with real specimen data, share feedback and help
+    shape what comes next.
+  </p>
+
+  <a
+    class="source-button"
+    href="https://github.com/SaniyaSani/EntoKit"
+    target="_blank"
+    rel="noreferrer"
+  >
+    View source on GitHub <span aria-hidden="true">↗</span>
+  </a>
+</div>
+      </section>
+
+      <footer>
+        <a class="brand footer-brand" href="#top">
+          <span class="brand-flower" aria-hidden="true">✣</span>
+          <span>EntoKit</span>
+        </a>
+       <p>Open-source entomology tools · Created by Sanny</p>
+        <a href="#top">Back to top ↑</a>
+      </footer>
     </main>
-  </div>
-
-  <input type="file" id="importFileInput" accept=".xlsx,.csv,.tsv,text/csv,text/tab-separated-values" hidden>
-  <input type="file" id="backupFileInput" accept=".json,application/json" hidden>
-
-  <div class="modal-backdrop" id="modalBackdrop" hidden>
-    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
-      <div class="modal-head">
-        <div><div class="eyebrow" id="modalEyebrow">EntoBox</div><h2 id="modalTitle">Dialog</h2></div>
-        <button class="icon-btn" id="modalClose">×</button>
-      </div>
-      <div class="modal-body" id="modalBody"></div>
-      <div class="modal-foot" id="modalFoot"></div>
-    </div>
-  </div>
-
-  <div class="tour-overlay" id="tourOverlay" hidden>
-    <div class="tour-focus" id="tourFocus"></div>
-    <div class="tour-card" id="tourCard" role="dialog" aria-live="polite">
-      <div class="tour-step-label" id="tourStepLabel">Step 1 of 5</div>
-      <h3 id="tourTitle">Welcome</h3>
-      <p id="tourText"></p>
-      <div class="tour-actions"><button class="btn tiny" id="tourSkipBtn">Skip tour</button><span></span><button class="btn tiny" id="tourBackBtn">Back</button><button class="btn primary tiny" id="tourNextBtn">Next</button></div>
-    </div>
-  </div>
-
-  <div class="toast-stack" id="toastStack"></div>
-  <script>
-  (async () => {
-    const VERSION = '4.6.0';
-    const currentBase = new URL('./', window.location.href).pathname;
-    try {
-      if ('serviceWorker' in navigator) {
-        const registrations = await navigator.serviceWorker.getRegistrations();
-        await Promise.all(registrations
-          .filter(registration => new URL(registration.scope).pathname.startsWith(currentBase))
-          .map(registration => registration.unregister()));
-      }
-      if ('caches' in window) {
-        const keys = await caches.keys();
-        await Promise.all(keys.filter(key => key.startsWith('entobox-')).map(key => caches.delete(key)));
-      }
-    } catch (error) {
-      console.warn('EntoBox cache cleanup skipped:', error);
-    }
-    const script = document.createElement('script');
-    script.src = `app.js?v=${VERSION}`;
-    script.onerror = () => {
-      document.body.insertAdjacentHTML('beforeend', '<div style="position:fixed;inset:20px;z-index:9999;background:white;border:1px solid #d9e2de;border-radius:18px;padding:24px;font-family:system-ui;box-shadow:0 20px 60px rgba(0,0,0,.2)"><h2>EntoBox could not load the newest files</h2><p>Please refresh with Command + Shift + R, or reopen the site with <code>?v=4.6</code> at the end of the address.</p></div>');
-    };
-    document.body.appendChild(script);
-  })();
-</script>
-</body>
+  </body>
 </html>
